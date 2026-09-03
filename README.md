@@ -22,6 +22,26 @@ GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=devopstoolkit-dotai-app
 
 ## Installation
 
+This plugin installs into **a Grafana you already run**. It is deliberately not
+part of the [dot-ai-stack](https://github.com/vfarcic/dot-ai-stack) umbrella
+chart: that chart deploys the dot-ai MCP server, controller and UI, and does not
+deploy Grafana, so there is nothing there for a Grafana plugin to install into.
+Point this plugin at your dot-ai MCP server via [Configuration](#configuration).
+
+### From a release
+
+Download the `devopstoolkit-dotai-app-<version>.zip` from the
+[latest release](https://github.com/vfarcic/dot-ai-grafana/releases), verify it
+against the published `.sha256`, and unzip it into Grafana's plugin directory.
+
+Releases are **unsigned**, so Grafana must be told to load it:
+
+```bash
+GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=devopstoolkit-dotai-app
+```
+
+### From source
+
 ```bash
 npm install
 npm run build
@@ -35,6 +55,22 @@ Local Grafana (create-plugin docker):
 ```bash
 npm run server
 ```
+
+## Releasing
+
+Tag the version and the [release workflow](.github/workflows/release.yml) does
+the rest — it syncs `package.json` from the tag (so `plugin.json` reports the
+right version), assembles `changelog.d/` fragments into `CHANGELOG.md` with
+towncrier, and attaches the plugin zip plus its SHA256 to the GitHub release:
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+Every user-visible change should land with a fragment in `changelog.d/`, named
+`<issue>.<type>.md` where type is one of `feature`, `bugfix`, `breaking`,
+`doc`, `misc`. CI renders them on every PR, so a malformed fragment fails there
+rather than at release time.
 
 ## Configuration
 

@@ -1,29 +1,197 @@
-# This GitHub Action automates the process of building Grafana plugins.
-# (For more information, see https://github.com/grafana/plugin-actions/blob/main/build-plugin/README.md)
+# Release the plugin on a version tag, following the dot-ai* convention:
+# tag push or manual dispatch, towncrier changelog, SHA-pinned actions, and the
+# plugin version synced from the tag.
+#
+# Releases are UNSIGNED by design (see #23). Installing requires
+# GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=devopstoolkit-dotai-app.
+# If the plugin is later signed, add a signing step before "Get plugin metadata"
+# and set GRAFANA_ACCESS_POLICY_TOKEN.
 name: Release
 
 on:
+  # Trigger 1: Tag push (normal release flow)
   push:
     tags:
-      - 'v*' # Run workflow on version tags, e.g. v1.0.0.
+      - 'v*'
 
-permissions: read-all
+  # Trigger 2: Manual (for retroactive cleanup or special cases)
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 0.2.0)'
+        required: true
+      notes_only:
+        description: 'Only update release notes (skip artifact publishing)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release:
+    name: Build, package and release
+    runs-on: ubuntu-latest
     permissions:
       contents: write
-    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          persist-credentials: false
+          # Release commits the assembled changelog and version bump back to the
+          # default branch, so credentials are kept and history is complete.
+          ref: main
+          fetch-depth: 0
 
-      - uses: grafana/plugin-actions/build-plugin@build-plugin/v1.2.0
-        # Uncomment to enable plugin signing
-        # (For more info on how to generate the access policy token see https://grafana.com/developers/plugin-tools/publish-a-plugin/sign-a-plugin#generate-an-access-policy-token)
-        #with:
-        # Make sure to save the token in your repository secrets
-        #policy_token: $
-        # Usage of GRAFANA_API_KEY is deprecated, prefer `policy_token` option above
-        #grafana_token: $
+      - name: Determine version and mode
+        id: config
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+            NOTES_ONLY="false"
+          else
+            VERSION="${INPUT_VERSION}"
+            NOTES_ONLY="${INPUT_NOTES_ONLY}"
+          fi
+          # Tolerate a v-prefix passed to workflow_dispatch.
+          VERSION="${VERSION#v}"
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Version '${VERSION}' is not semver (expected e.g. 0.2.0)"
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "notes_only=${NOTES_ONLY}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Releasing ${VERSION} (notes_only=${NOTES_ONLY})"
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_NOTES_ONLY: ${{ inputs.notes_only }}
+
+      - name: Setup Node.js environment
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Setup Python (for towncrier)
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+
+      - name: Install towncrier
+        run: pip install towncrier==24.8.0
+
+      - name: Assemble changelog
+        id: notes
+        run: |
+          if [ -n "$(find changelog.d -type f ! -name '.gitkeep' -print -quit)" ]; then
+            towncrier build --yes --version "${VERSION}"
+            echo "has_notes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No changelog fragments; leaving CHANGELOG.md untouched."
+            echo "has_notes=false" >> "$GITHUB_OUTPUT"
+          fi
+          # Extract just this version's section for the release body.
+          awk -v ver="## [${VERSION}]" '
+            index($0, ver) == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "Release ${VERSION}" > release-notes.md
+          fi
+        env:
+          VERSION: ${{ steps.config.outputs.version }}
+
+      - name: Sync package.json version to tag
+        run: npm version "${VERSION}" --no-git-tag-version --allow-same-version
+        env:
+          VERSION: ${{ steps.config.outputs.version }}
+
+      - name: Build frontend
+        if: steps.config.outputs.notes_only != 'true'
+        run: npm run build
+
+      - name: Setup Go environment
+        if: steps.config.outputs.notes_only != 'true'
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build backend
+        if: steps.config.outputs.notes_only != 'true'
+        uses: magefile/mage-action@a662bd8c29d8106879588cfff83b2faf6e6f59db # v4.0.0
+        with:
+          version: latest
+          args: buildAll
+
+      - name: Get plugin metadata
+        id: metadata
+        if: steps.config.outputs.notes_only != 'true'
+        run: |
+          PLUGIN_ID=$(jq -r .id dist/plugin.json)
+          PLUGIN_VERSION=$(jq -r .info.version dist/plugin.json)
+          # %VERSION% resolves from package.json at build time, so this is the
+          # guard that the tag actually reached the packaged manifest.
+          if [ "${PLUGIN_VERSION}" != "${VERSION}" ]; then
+            echo "::error::dist/plugin.json version '${PLUGIN_VERSION}' != tag '${VERSION}'"
+            exit 1
+          fi
+          echo "plugin-id=${PLUGIN_ID}" >> "$GITHUB_OUTPUT"
+          echo "archive=${PLUGIN_ID}-${PLUGIN_VERSION}.zip" >> "$GITHUB_OUTPUT"
+        env:
+          VERSION: ${{ steps.config.outputs.version }}
+
+      - name: Package plugin
+        if: steps.config.outputs.notes_only != 'true'
+        run: |
+          mv dist "${PLUGIN_ID}"
+          zip "${ARCHIVE}" "${PLUGIN_ID}" -r
+          sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
+          cat "${ARCHIVE}.sha256"
+        env:
+          ARCHIVE: ${{ steps.metadata.outputs.archive }}
+          PLUGIN_ID: ${{ steps.metadata.outputs.plugin-id }}
+
+      - name: Validate plugin metadata
+        if: steps.config.outputs.notes_only != 'true'
+        run: |
+          docker run --pull=always \
+            -v "$PWD/${ARCHIVE}:/archive.zip" \
+            grafana/plugin-validator-cli -analyzer=metadatavalid /archive.zip
+        env:
+          ARCHIVE: ${{ steps.metadata.outputs.archive }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ steps.config.outputs.tag }}
+          name: ${{ steps.config.outputs.tag }}
+          body_path: release-notes.md
+          generate_release_notes: true
+          # notes_only builds no artifacts, so nothing matches here and that is fine.
+          fail_on_unmatched_files: false
+          files: |
+            *.zip
+            *.zip.sha256
+
+      - name: Commit changelog and version bump
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add CHANGELOG.md package.json changelog.d
+          if git diff --cached --quiet; then
+            echo "Nothing to commit."
+            exit 0
+          fi
+          git commit -m "chore: release ${TAG} [skip ci]"
+          git push origin HEAD:main
+        env:
+          TAG: ${{ steps.config.outputs.tag }}

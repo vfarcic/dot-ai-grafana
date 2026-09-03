@@ -83,6 +83,18 @@ jobs:
           version: latest
           args: test
 
+      - name: Setup Python (for towncrier)
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+
+      - name: Validate changelog fragments
+        run: |
+          pip install towncrier==24.8.0
+          # Proves the towncrier config and every changelog.d fragment render
+          # before a release depends on them. --draft writes nothing.
+          towncrier build --draft --version 0.0.0
+
       - name: Check for E2E
         id: check-for-e2e
         run: |
