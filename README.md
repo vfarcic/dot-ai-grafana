@@ -72,6 +72,23 @@ Every user-visible change should land with a fragment in `changelog.d/`, named
 `doc`, `misc`. CI renders them on every PR, so a malformed fragment fails there
 rather than at release time.
 
+### Branch protection and the release token
+
+`main` carries a ruleset ("main: require PR and green CI") that requires a pull
+request and a passing `Build, lint and unit tests` check, and blocks force
+pushes and deletion. Repository admins can bypass it.
+
+The release job commits the assembled changelog and version bump back to
+`main`, which the ruleset would otherwise reject: `GITHUB_TOKEN` has write
+access but is not an admin, and GitHub Actions cannot be granted a ruleset
+bypass on a personal-account repository. So the job uses a `RELEASE_TOKEN`
+secret when present — a fine-grained PAT from a repository admin with
+`contents: write` on this repo.
+
+Without `RELEASE_TOKEN` the release still succeeds: the GitHub Release and its
+artifacts publish normally, and only the commit-back is skipped, with a warning
+naming the `towncrier` command to re-apply the changelog through a PR.
+
 ## Configuration
 
 As Grafana Admin: **Administration → Plugins → dot-ai → Configuration**.

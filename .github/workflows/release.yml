@@ -44,6 +44,13 @@ jobs:
         with:
           # Release commits the assembled changelog and version bump back to the
           # default branch, so credentials are kept and history is complete.
+          #
+          # The "main: require PR and green CI" ruleset requires a pull request,
+          # and GITHUB_TOKEN is not a repository admin, so it cannot push
+          # directly. RELEASE_TOKEN (a PAT belonging to a repo admin) bypasses
+          # the ruleset. Without that secret the commit-back is skipped with a
+          # warning rather than failing the release - see the final step.
+          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
           ref: main
           fetch-depth: 0
 
@@ -192,6 +199,19 @@ jobs:
             exit 0
           fi
           git commit -m "chore: release ${TAG} [skip ci]"
-          git push origin HEAD:main
+          if git push origin HEAD:main; then
+            echo "Changelog and version bump pushed to main."
+            exit 0
+          fi
+          # The release itself is already published; a rejected commit-back must
+          # not fail it. This happens when RELEASE_TOKEN is unset and the branch
+          # ruleset requires a pull request.
+          echo "::warning title=Commit-back skipped::Could not push the release \
+          commit to main. The GitHub Release and its artifacts are published, but \
+          CHANGELOG.md and package.json on main are still at the pre-release \
+          state. Set the RELEASE_TOKEN secret (a PAT from a repository admin) to \
+          let the release job push through the branch ruleset, then re-apply the \
+          changelog with 'towncrier build --version ${VERSION}' in a PR."
         env:
           TAG: ${{ steps.config.outputs.tag }}
+          VERSION: ${{ steps.config.outputs.version }}
