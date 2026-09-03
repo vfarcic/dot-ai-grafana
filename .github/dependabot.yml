@@ -14,6 +14,17 @@ updates:
     commit-message:
       prefix: 'chore'
       include: 'scope'
+    ignore:
+      # @grafana/data, /runtime, /ui and /schema are pinned together at the
+      # reference host version (11.4.x). Bumping one across a major breaks peer
+      # resolution outright - npm ci fails with ERESOLVE, as it did in #24 -
+      # and would raise the effective Grafana floor above the declared
+      # grafanaDependency ">=11.0.0". A major move has to be deliberate and
+      # cover all four at once, so Dependabot should not propose it piecemeal.
+      # Minor and patch still flow through the `grafana` group below.
+      - dependency-name: '@grafana/*'
+        update-types:
+          - 'version-update:semver-major'
     groups:
       unit-test:
         patterns:
