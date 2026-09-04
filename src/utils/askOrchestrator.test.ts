@@ -8,7 +8,7 @@ import {
   runAskOrchestrator,
 } from './askOrchestrator';
 import { emptyThread, MAX_INTENT_CHARS } from './progressiveContext';
-import { StackContextResult } from './grafanaStack';
+import { ALERT_CAP, LOG_LINE_CAP, PROM_SERIES_CAP, StackContextResult, TEMPO_TRACE_CAP } from './grafanaStack';
 import { ToolCallResult } from './dotaiApi';
 
 function stackResult(overrides: Partial<StackContextResult> = {}): StackContextResult {
@@ -706,5 +706,83 @@ describe('runAskOrchestrator', () => {
     expect(result.ok).toBe(false);
     expect(result.errorMessage).toMatch(/cancelled/i);
     expect(callTool).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Issue #14 end to end: with Prometheus and Alertmanager both returning data, the
+ * packer used to spend the whole 1000-char budget on evidence and cap the question
+ * off the tail — on the corrective hops the follow-up instruction went with it.
+ */
+describe('every hop keeps the operator question (issue #14)', () => {
+  const QUESTION = 'why is checkout-api CrashLooping in namespace production-team?';
+
+  /** Loki, Prometheus and Alertmanager all at their grafanaStack caps. */
+  function fullStackCurrent(): string {
+    const scope = '(pod/checkout-api ns/production-team)';
+    return [
+      `Loki last 15m ${scope}:`,
+      Array.from(
+        { length: LOG_LINE_CAP },
+        (_, i) => `10:${String(i).padStart(2, '0')}:12.4Z level=error liveness probe failed: 500`
+      ).join('\n'),
+      '',
+      `Prometheus last 15m ${scope}:`,
+      Array.from(
+        { length: PROM_SERIES_CAP },
+        (_, i) => `checkout-api-7d9f8b6c4-x0q${i} ns/production-team restarts=${21 - i}`
+      ).join('\n'),
+      '',
+      `Tempo last 15m ${scope}:`,
+      Array.from({ length: TEMPO_TRACE_CAP }, (_, i) => `trace 4bf92f3577b34da${i}`).join('\n'),
+      '',
+      `Alertmanager ${scope}:`,
+      Array.from(
+        { length: ALERT_CAP },
+        (_, i) => `KubePodCrashLoopBackOff pod=checkout-api-7d9f8b6c4-x0q${i} ns=production-team severity=critical`
+      ).join('\n'),
+    ].join('\n');
+  }
+
+  test('conflict hop still carries the question and the corrective instruction', async () => {
+    const current = fullStackCurrent();
+    expect(current.length).toBeGreaterThan(MAX_INTENT_CHARS);
+
+    const summaries = [
+      "The namespace 'production-team' does not exist in the current cluster.",
+      'Grafana Current shows checkout-api in production-team restarting; KubePodCrashLoopBackOff is firing.',
+    ];
+    let n = 0;
+    const callTool = jest.fn(async (_t, text): Promise<ToolCallResult> => {
+      const summary = summaries[Math.min(n, summaries.length - 1)];
+      n += 1;
+      return { ok: true, status: 200, summary, raw: { packed: text } };
+    });
+
+    const result = await runAskOrchestrator({
+      tool: 'query',
+      question: QUESTION,
+      thread: emptyThread(),
+      fetchStack: jest.fn(async () =>
+        stackResult({ current, logLines: ['boom'], alertLines: ['KubePodCrashLoopBackOff'], currentEmpty: false })
+      ),
+      callTool,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.hops).toBe(2);
+
+    for (const [, text] of callTool.mock.calls) {
+      const packed = text as string;
+      expect(packed.length).toBeLessThanOrEqual(MAX_INTENT_CHARS);
+      // Verbatim, and not left dangling behind an ellipsis.
+      expect(packed).toContain(QUESTION);
+      expect(packed.endsWith('…')).toBe(false);
+      // Evidence still gets packed — the question is reserved, not privileged.
+      expect(packed).toContain('Loki last 15m');
+    }
+
+    // The corrective instruction the conflict hop exists to deliver survives too.
+    expect(callTool.mock.calls[1][1] as string).toMatch(/Do NOT deny facts in Current/i);
   });
 });

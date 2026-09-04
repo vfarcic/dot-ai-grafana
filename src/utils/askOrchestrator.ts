@@ -207,13 +207,16 @@ function wantsObservabilityFollowUp(question: string, summary: string): boolean 
   );
 }
 
-function acrossClustersFollowUp(question: string): string {
+/**
+ * Follow-up directives are returned as lines, not a joined box, so the packer can
+ * shed them from the tail under budget pressure while the question stays whole.
+ */
+function acrossClustersInstructions(): string[] {
   return [
-    question,
     'Follow-up: search across ALL clusters and vclusters (not only the default kube context).',
     'Keep and prefer concrete Grafana Current facts (Loki/Prom/Tempo/Alertmanager) — do not deny namespaces/pods that already appear in Current.',
     'If a name is missing in one cluster, check other clusters/vclusters before saying it does not exist.',
-  ].join('\n');
+  ];
 }
 
 /**
@@ -221,7 +224,7 @@ function acrossClustersFollowUp(question: string): string {
  * Names the datasources and the pod/ns Current actually covers so the model
  * cannot re-run the same "namespace does not exist" denial on softer wording.
  */
-function conflictFollowUp(question: string, stackCurrent: string): string {
+function conflictInstructions(stackCurrent: string): string[] {
   const sources = currentEvidenceSources(stackCurrent);
   const header =
     /(?:Loki last 15m|Prometheus last 15m|Tempo last 15m|Alertmanager)\s*\(([^)\n]*)\)\s*:/i.exec(
@@ -233,29 +236,27 @@ function conflictFollowUp(question: string, stackCurrent: string): string {
     .join(' ');
 
   return [
-    question,
     'Follow-up: your previous answer is REJECTED — it denied a fact that Grafana Current already proves.',
     `Grafana Current above holds live evidence from ${sources.length > 0 ? sources.join(', ') : 'the host observability stack'}${target ? ` for ${target}` : ''}, read from this Grafana host in the last 15m.`,
     'Do NOT deny facts in Current. Do NOT say the namespace/pod does not exist, was not found, is not deployed, or belongs to a different cluster.',
     'The kube context you query is one cluster among several; absence there is not absence. Current is ground truth for the host cluster.',
     'Answer the original question FROM the Current evidence: quote the concrete Loki/Prometheus/Tempo/Alertmanager lines, then state which cluster/vcluster the workload appears to run in and what remains unknown.',
-  ].join('\n');
+  ];
 }
 
 /**
  * Hop-3 prompt: hop 2 stopped denying Current but still refused to answer from it.
  * Last hop in the cap — demand a committed answer, not another accessibility caveat.
  */
-function hedgeFollowUp(question: string, stackCurrent: string): string {
+function hedgeInstructions(stackCurrent: string): string[] {
   const sources = currentEvidenceSources(stackCurrent);
 
   return [
-    question,
     'Final follow-up: your previous answer still hedged — it parked the target behind "not accessible" / "cannot confirm" instead of answering the question.',
     `Whether your kube context can reach the workload is NOT the question. Grafana Current holds live ${sources.length > 0 ? sources.join(', ') : 'host observability'} evidence read from this Grafana host in the last 15m, and that evidence stands on its own.`,
     'Do NOT repeat that the pod/namespace is unreachable, not visible, not accessible, or outside your available contexts.',
     'Answer now FROM Current: state what the workload is doing per the concrete evidence lines, name the cluster/vcluster it most likely runs in, and list only what is genuinely still unknown.',
-  ].join('\n');
+  ];
 }
 
 /**
@@ -365,7 +366,11 @@ export async function runAskOrchestrator(args: {
     }
   };
 
-  const callDotAI = async (box: string, branch: AskBranch): Promise<ToolCallResult> => {
+  const callDotAI = async (
+    box: string,
+    branch: AskBranch,
+    instructions: string[] = []
+  ): Promise<ToolCallResult> => {
     if (aborted()) {
       return {
         ok: false,
@@ -390,6 +395,7 @@ export async function runAskOrchestrator(args: {
       current: stackSnapshot || args.thread.current,
       map,
       box,
+      instructions,
     });
     lastPacked = packed;
     const meta: AskMeta = {
@@ -402,8 +408,11 @@ export async function runAskOrchestrator(args: {
     const result = await callTool('query', packed, meta);
     if (result.ok) {
       lastSummary = result.summary.trim() ? result.summary : 'dot-ai returned no summary';
-      map = mergeMap(map, box, lastSummary);
-      history = appendHistory(history, box, lastSummary);
+      // Display History and Map keep the whole ask, instructions included, even when
+      // the packer had to shed some of those lines to stay inside the intent budget.
+      const asked = [box, ...instructions].join('\n');
+      map = mergeMap(map, asked, lastSummary);
+      history = appendHistory(history, asked, lastSummary);
     }
     return result;
   };
@@ -444,7 +453,7 @@ export async function runAskOrchestrator(args: {
       const answerTarget = parsePodNamespace(lastSummary);
 
       if (unscoped && hops === 1) {
-        const r = await callDotAI(acrossClustersFollowUp(question), 'across');
+        const r = await callDotAI(question, 'across', acrossClustersInstructions());
         if (!r.ok) {
           return finish(false, r.errorMessage || 'Request failed');
         }
@@ -453,7 +462,7 @@ export async function runAskOrchestrator(args: {
 
       if (conflict) {
         conflictHopUsed = true;
-        const r = await callDotAI(conflictFollowUp(question, stackSnapshot), 'conflict');
+        const r = await callDotAI(question, 'conflict', conflictInstructions(stackSnapshot));
         if (!r.ok) {
           return finish(false, r.errorMessage || 'Request failed');
         }
@@ -463,7 +472,7 @@ export async function runAskOrchestrator(args: {
       // Hop 3: the conflict hop stopped the denial but the answer still hedges
       // ("not accessible" / "cannot confirm") — force a committed answer from Current.
       if (conflictHopUsed && answerHedgesOnCurrent(stackSnapshot, lastSummary)) {
-        const r = await callDotAI(hedgeFollowUp(question, stackSnapshot), 'hedge');
+        const r = await callDotAI(question, 'hedge', hedgeInstructions(stackSnapshot));
         if (!r.ok) {
           return finish(false, r.errorMessage || 'Request failed');
         }
@@ -484,18 +493,14 @@ export async function runAskOrchestrator(args: {
               : `logs and metrics in namespace ${answerTarget.namespace}`;
         await loadStack(refineQ);
         if (!stackEmpty) {
-          const r = await callDotAI(
-            [
-              question,
-              `Follow-up: use Grafana Current for ${[
-                answerTarget.pod ? `pod/${answerTarget.pod}` : '',
-                answerTarget.namespace ? `ns/${answerTarget.namespace}` : '',
-              ]
-                .filter(Boolean)
-                .join(' ')}. Prefer Current facts; search other clusters only if still needed.`,
-            ].join('\n'),
-            'refine'
-          );
+          const r = await callDotAI(question, 'refine', [
+            `Follow-up: use Grafana Current for ${[
+              answerTarget.pod ? `pod/${answerTarget.pod}` : '',
+              answerTarget.namespace ? `ns/${answerTarget.namespace}` : '',
+            ]
+              .filter(Boolean)
+              .join(' ')}. Prefer Current facts; search other clusters only if still needed.`,
+          ]);
           if (!r.ok) {
             return finish(false, r.errorMessage || 'Request failed');
           }
@@ -527,10 +532,9 @@ export async function runAskOrchestrator(args: {
     await loadStack(refineQ);
     // Always take the observability leg once triggered (cluster-wide OK); never skip solely on empty parse.
     if (hops < MAX_ASK_HOPS) {
-      const r2 = await callDotAI(
-        `${question}\nUse Grafana Current facts in your answer. Search other clusters/vclusters if names are missing in the default context.`,
-        'refine'
-      );
+      const r2 = await callDotAI(question, 'refine', [
+        'Use Grafana Current facts in your answer. Search other clusters/vclusters if names are missing in the default context.',
+      ]);
       if (!r2.ok) {
         return finish(false, r2.errorMessage || 'Request failed');
       }
@@ -546,8 +550,9 @@ export async function runAskOrchestrator(args: {
       break;
     }
     const r = await callDotAI(
-      conflict ? conflictFollowUp(question, stackSnapshot) : hedgeFollowUp(question, stackSnapshot),
-      conflict ? 'conflict' : 'hedge'
+      question,
+      conflict ? 'conflict' : 'hedge',
+      conflict ? conflictInstructions(stackSnapshot) : hedgeInstructions(stackSnapshot)
     );
     if (!r.ok) {
       return finish(false, r.errorMessage || 'Request failed');

@@ -35,12 +35,32 @@ export function stablePreamble(tool: DotAITool): string {
   return 'Tool: Query. Analysis and cluster facts only — no mutations. Answer FROM Current when present. Prefer concrete Current facts (logs, metrics, alerts, cluster data) over generic advice.';
 }
 
+/**
+ * Slice to at most `units` UTF-16 code units without splitting a surrogate pair.
+ * Budgets are counted in code units (String.length), so the unit stays the same —
+ * only an orphaned high surrogate, which would render as U+FFFD, is dropped.
+ */
+function sliceUnits(text: string, units: number): string {
+  if (units <= 0) {
+    return '';
+  }
+  const out = text.slice(0, units);
+  const last = out.charCodeAt(out.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) {
+    return out.slice(0, -1);
+  }
+  return out;
+}
+
 function oneLine(text: string, max: number): string {
   const flat = text.replace(/\s+/g, ' ').trim();
   if (flat.length <= max) {
     return flat;
   }
-  return `${flat.slice(0, Math.max(0, max - 1)).trimEnd()}…`;
+  if (max <= 0) {
+    return '';
+  }
+  return `${sliceUnits(flat, max - 1).trimEnd()}…`;
 }
 
 function cap(text: string, max: number): string {
@@ -48,7 +68,12 @@ function cap(text: string, max: number): string {
   if (t.length <= max) {
     return t;
   }
-  return `${t.slice(0, Math.max(0, max - 1)).trimEnd()}…`;
+  // A one-char budget cannot hold content plus the ellipsis; drop the block instead
+  // of returning a lone "…" that is longer than the budget it was given.
+  if (max <= 0) {
+    return '';
+  }
+  return `${sliceUnits(t, max - 1).trimEnd()}…`;
 }
 
 /**
@@ -78,21 +103,52 @@ export const HINT_STOPWORDS: Record<string, true> = {
 };
 
 /**
+ * Minimum Current the packer defends for a hop that carries follow-up instructions.
+ * A corrective hop tells the model to quote the concrete evidence lines, so shedding
+ * Current to nothing to fit the instruction text would make the instruction incoherent.
+ */
+export const MIN_CURRENT_CHARS = 240;
+
+/** Chars `pack` spends on the "\n\nCurrent:\n" label around a non-empty Current block. */
+const CURRENT_LABEL_CHARS = '\n\nCurrent:\n'.length;
+
+/** Section heads `formatCurrent` writes, used to find one block's boundaries. */
+const SECTION_HEADS = 'Loki|Prometheus|Tempo|Alertmanager';
+
+/**
+ * Evidence blocks whose body lines can be peeled, in shedding order: logs are the
+ * bulkiest and most repetitive, restart counts next, firing alerts last.
+ */
+const TRIM_ORDER = ['Loki last 15m', 'Prometheus last 15m', 'Alertmanager'];
+
+/**
  * Pack Stable + Current + Map + box for the next POST.
  * History is intentionally omitted.
- * Always ≤ MAX_INTENT_CHARS: drop Map, then Tempo, then trim Loki, then hard cap.
+ *
+ * The box (the operator's question, plus any plugin-written follow-up instructions)
+ * is reserved BEFORE evidence is packed, so growing datasource output can never
+ * delete or truncate what was asked. Always ≤ MAX_INTENT_CHARS, shedding in order:
+ * follow-up instruction lines down to the Current floor, then Map, Tempo, Loki,
+ * Prometheus and Alertmanager lines, then a cap of the Current block itself.
+ * The packed tail holds the box, and is never blind-capped.
  */
 export function buildRequestText(args: {
   tool: DotAITool;
   current: string;
   map: string;
   box: string;
+  /**
+   * Plugin-written follow-up directives appended under the question. Unlike the
+   * question they are sheddable: element order is priority order, tail first out.
+   */
+  instructions?: string[];
 }): string {
   const box = args.box.trim();
+  const instructions = (args.instructions ?? []).map((line) => line.trim()).filter(Boolean);
   let current = args.current.trim();
   let map = args.map.trim();
 
-  const pack = (c: string, m: string): string => {
+  const pack = (c: string, m: string, instr: string[], question = box): string => {
     const parts: string[] = [stablePreamble(args.tool)];
     if (c) {
       parts.push('', 'Current:', c);
@@ -100,38 +156,63 @@ export function buildRequestText(args: {
     if (m) {
       parts.push('', 'Map:', m);
     }
-    parts.push('', args.tool === 'remediate' ? 'Issue:' : 'Question:', box);
+    parts.push('', args.tool === 'remediate' ? 'Issue:' : 'Question:', [question, ...instr].join('\n'));
     return parts.join('\n');
   };
 
-  let text = pack(current, map);
+  let text = pack(current, map, instructions);
+  if (text.length <= MAX_INTENT_CHARS) {
+    return text;
+  }
+
+  // 0. Reserve the box. Only the plugin-written follow-up lines yield, and only
+  //    until Current can hold its floor — the question itself is never shed here.
+  let instr = instructions;
+  const floor = current ? Math.min(MIN_CURRENT_CHARS, current.length) + CURRENT_LABEL_CHARS : 0;
+  while (instr.length > 0 && MAX_INTENT_CHARS - pack('', '', instr).length < floor) {
+    instr = instr.slice(0, -1);
+  }
+  text = pack(current, map, instr);
   if (text.length <= MAX_INTENT_CHARS) {
     return text;
   }
 
   // 1. Drop Map
   map = '';
-  text = pack(current, map);
+  text = pack(current, map, instr);
   if (text.length <= MAX_INTENT_CHARS) {
     return text;
   }
 
   // 2. Drop Tempo section from Current
   current = dropTempoSection(current);
-  text = pack(current, map);
+  text = pack(current, map, instr);
   if (text.length <= MAX_INTENT_CHARS) {
     return text;
   }
 
-  // 3. Trim Loki body lines until under budget
-  current = trimLokiSection(current, (c) => pack(c, map).length, MAX_INTENT_CHARS);
-  text = pack(current, map);
+  // 3. Peel Loki, then Prometheus, then Alertmanager body lines. Stopping at Loki
+  //    was what let metric and alert lines crowd the question out of the budget.
+  for (const head of TRIM_ORDER) {
+    current = trimSection(current, head, (c) => pack(c, map, instr).length, MAX_INTENT_CHARS);
+    text = pack(current, map, instr);
+    if (text.length <= MAX_INTENT_CHARS) {
+      return text;
+    }
+  }
+
+  // 4. Cap the Current block — the evidence — never the packed string, whose tail
+  //    is the box. Capping the pack is what silently deleted the question.
+  current = cap(current, current.length - (text.length - MAX_INTENT_CHARS));
+  text = pack(current, map, instr);
   if (text.length <= MAX_INTENT_CHARS) {
     return text;
   }
 
-  // 4. Hard cap full packed string
-  return cap(text, MAX_INTENT_CHARS);
+  // 5. Preamble + question alone overflow: no evidence is left to cut, so cap the
+  //    question deliberately rather than letting a blind cap eat its tail.
+  const overhead = pack('', '', []).length - box.length;
+  return pack('', '', [], cap(box, MAX_INTENT_CHARS - overhead));
 }
 
 /** Remove the Tempo last-15m block from a stack Current string. */
@@ -144,24 +225,28 @@ function dropTempoSection(current: string): string {
 }
 
 /**
- * Peel Loki log lines from the end of the Loki block until packed length ≤ max.
+ * Peel body lines from the end of one Current block until packed length ≤ max.
+ * The tail of a block is its lowest-ranked entry: `topk` output and the alert list
+ * arrive ordered, and log lines arrive oldest-last.
  */
-function trimLokiSection(
+function trimSection(
   current: string,
+  head: string,
   measure: (c: string) => number,
   max: number
 ): string {
-  const match =
-    /^(Loki last 15m[^\n]*:\n)([\s\S]*?)(?=\n\n(?:Prometheus|Tempo|Alertmanager)\b|\n*$)/i.exec(
-      current
-    );
+  const match = new RegExp(
+    `(${head}[^\\n]*:\\n)([\\s\\S]*?)(?=\\n\\n(?:${SECTION_HEADS})\\b|\\n*$)`,
+    'i'
+  ).exec(current);
   if (!match) {
     return current;
   }
+  const before = current.slice(0, match.index);
   const header = match[1];
   let body = match[2];
-  const rest = current.slice(match[0].length);
-  const rebuild = (b: string) => `${header}${b}${rest}`.replace(/\n{3,}/g, '\n\n').trim();
+  const rest = current.slice(match.index + match[0].length);
+  const rebuild = (b: string) => `${before}${header}${b}${rest}`.replace(/\n{3,}/g, '\n\n').trim();
 
   let out = rebuild(body);
   while (measure(out) > max) {
