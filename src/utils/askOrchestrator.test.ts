@@ -7,8 +7,15 @@ import {
   MAX_ASK_HOPS,
   runAskOrchestrator,
 } from './askOrchestrator';
-import { emptyThread, MAX_INTENT_CHARS } from './progressiveContext';
-import { ALERT_CAP, LOG_LINE_CAP, PROM_SERIES_CAP, StackContextResult, TEMPO_TRACE_CAP } from './grafanaStack';
+import { emptyThread, MAX_INTENT_CHARS, MAX_MAP_CHARS, mergeMap } from './progressiveContext';
+import {
+  ALERT_CAP,
+  dashboardHintFromUids,
+  LOG_LINE_CAP,
+  PROM_SERIES_CAP,
+  StackContextResult,
+  TEMPO_TRACE_CAP,
+} from './grafanaStack';
 import { ToolCallResult } from './dotaiApi';
 
 function stackResult(overrides: Partial<StackContextResult> = {}): StackContextResult {
@@ -22,6 +29,7 @@ function stackResult(overrides: Partial<StackContextResult> = {}): StackContextR
     tempoLines: overrides.tempoLines ?? [],
     alertLines: overrides.alertLines ?? [],
     currentEmpty: overrides.currentEmpty ?? false,
+    drilldowns: overrides.drilldowns ?? [],
   };
 }
 
@@ -268,6 +276,106 @@ describe('runAskOrchestrator', () => {
     }
   });
 
+  // Payload-growth guard for the navigation fold in this PR. formatCurrent() now ALWAYS appends a
+  // "Dashboards (from firing alerts):" block to Current, and fetchStackContext() always appends
+  // dashboardHintFromUids(...) to mapHint (src/utils/grafanaStack.ts). Both are charged against
+  // fixed budgets — Current 700 (MAX_CURRENT_CHARS), Map 400 (MAX_MAP_CHARS) — so the worst
+  // realistic case is measured here: a 30x145-char Loki dump, 8 firing alerts and 8 alert-linked
+  // dashboards give Current 5102 chars and put the merged Map exactly on its 400-char cap.
+  //
+  // Measured on this tree (rebased onto main efd80a4, post-#49): hop 1 = 982, hop 2 = 967 chars,
+  // both carrying the question. Measured on the pre-rebase branch (41996ab, pre-#49) the same
+  // inputs packed to exactly 1000/1000 and the tail — Question: — was shed, so the cap is the
+  // difference between an ask and 1000 chars of evidence with nothing asked.
+  //
+  // The block is charged on EVERY ask, not just this worst case. Same 30-line dump, question
+  // reserved, packed at MAX_INTENT_CHARS: without the block 971 chars keep 1 Loki line; with the
+  // unconditional "(none linked on firing alerts)" placeholder that Loki line is gone (899); with
+  // 8 links the Prometheus sample goes too (982, header only). Section headers and the alert lines
+  // are what must survive, so that is what this test asserts alongside the cap.
+  test('firing-alert dashboards + Loki dump + Map at cap still pack every hop ≤ 1000', async () => {
+    const dashboardUids = [
+      'k8s-workloads-overview-prod',
+      'loki-error-triage-2026q3',
+      'prom-restarts-by-namespace',
+      'crashloop-forensics-board',
+      'alertmanager-firing-heatmap',
+      'checkout-api-golden-signals',
+      'node-pressure-and-evictions',
+      'ingress-5xx-by-route-prod',
+    ];
+    const lokiLines = Array.from(
+      { length: 30 },
+      (_, i) => `k8s error line ${String(i).padStart(2, '0')} ${'x'.repeat(120)}`
+    );
+    const alertLines = Array.from(
+      { length: 8 },
+      (_, i) => `KubePodCrashLooping firing pod/checkout-api-${i} ns/prod`
+    );
+    // Section order and literals mirror formatCurrent() including the dashboards block.
+    const current = [
+      'Loki last 15m (pod/checkout-api ns/prod):',
+      ...lokiLines,
+      '',
+      'Prometheus last 15m (pod/checkout-api ns/prod):',
+      'pod/checkout-api ns/prod restarts=12',
+      '',
+      'Tempo last 15m (pod/checkout-api ns/prod):',
+      'trace abc123',
+      '',
+      'Alertmanager (pod/checkout-api ns/prod):',
+      ...alertLines,
+      '',
+      'Dashboards (from firing alerts):',
+      ...dashboardUids.map((u) => '/d/' + u),
+    ].join('\n');
+    // mapHint exactly as fetchStackContext builds it: datasource tokens, scope, then the
+    // production dashboards hint — long enough that the merged Map lands on its 400-char cap.
+    const mapHint = [
+      'Loki loki-production-us-east',
+      'Prometheus prometheus-production-us-east',
+      'Tempo tempo-production-us-east',
+      'Alertmanager alertmanager-production-us-east',
+      'ns/prod',
+      'pod/checkout-api',
+      dashboardHintFromUids(dashboardUids),
+    ].join(', ');
+    expect(current).toContain('Dashboards (from firing alerts):');
+    expect(mapHint).toContain('dashboards: /d/k8s-workloads-overview-prod');
+    // The dashboards hint alone pushes the merged Map onto its 400-char cap.
+    expect(mergeMap(mapHint, 'top issues in the cluster').length).toBe(MAX_MAP_CHARS);
+
+    const callTool = jest.fn(async (_t, text): Promise<ToolCallResult> => {
+      expect((text as string).length).toBeLessThanOrEqual(MAX_INTENT_CHARS);
+      return { ok: true, status: 200, summary: 'checkout-api is crashlooping across clusters', raw: {} };
+    });
+
+    const result = await runAskOrchestrator({
+      tool: 'query',
+      question: 'top issues in the cluster',
+      thread: emptyThread(),
+      fetchStack: jest.fn(async () =>
+        stackResult({ current, mapHint, logLines: lokiLines, alertLines, currentEmpty: false })
+      ),
+      callTool,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(callTool.mock.calls.length).toBeGreaterThanOrEqual(1);
+    for (const [, text] of callTool.mock.calls) {
+      const packed = text as string;
+      expect(packed.length).toBeLessThanOrEqual(MAX_INTENT_CHARS);
+      // The dashboards block must not have squeezed the live evidence out of the payload, and
+      // #49's reservation must still put the operator's own question on the wire (pre-#49 this
+      // exact payload shed both markers).
+      expect(packed).toContain('Current:');
+      expect(packed).toContain('Loki last 15m');
+      expect(packed).toContain('KubePodCrashLooping firing');
+      expect(packed).toContain('Question:');
+      expect(packed).toContain('top issues in the cluster');
+    }
+  });
+
   test.each([
     [
       'not available in the current cluster context',
@@ -313,6 +421,7 @@ describe('runAskOrchestrator', () => {
       const secondPacked = (callTool.mock.calls[1][1] as string) || '';
       expect(secondPacked).toMatch(/Do NOT deny facts in Current/i);
       expect(secondPacked).toContain('Loki last 15m');
+
       expect(result.summary).not.toMatch(/not available|from a different cluster/i);
     }
   );
@@ -398,10 +507,10 @@ describe('runAskOrchestrator', () => {
     expect(secondPacked).toMatch(/live evidence from Loki, Alertmanager for pod\/argocd-application-controller ns\/demo-gitops/i);
     expect(secondPacked).not.toMatch(/evidence from[^\n]*Prometheus/i);
 
-    // Hard denial ban — the soft "solely because" hedge is gone.
     expect(secondPacked).toMatch(/Do NOT deny facts in Current/i);
     expect(secondPacked).toMatch(/does not exist, was not found, is not deployed/i);
     expect(secondPacked).not.toMatch(/solely because/i);
+
 
     // A bare namespace-does-not-exist answer is not what the user ends up with.
     expect(result.summary).not.toMatch(/does not exist/i);
@@ -449,8 +558,8 @@ describe('runAskOrchestrator', () => {
     expect(thirdPacked).toMatch(/Final follow-up: your previous answer still hedged/i);
     expect(thirdPacked).toMatch(/Do NOT repeat that the pod\/namespace is unreachable/i);
     expect(thirdPacked).toMatch(/live Loki, Alertmanager evidence/i);
-    // Hop 3 still carries the Grafana evidence, not just the scolding.
     expect(thirdPacked).toContain('Loki last 15m');
+
 
     // The user ends on the committed answer, not the "not accessible" hedge.
     expect(result.summary).not.toMatch(/not accessible/i);
@@ -638,7 +747,7 @@ describe('runAskOrchestrator', () => {
     const result = await runAskOrchestrator({
       tool: 'remediate',
       question: 'pod crash',
-      thread: { current: 'prior current', map: 'ns/x', history: [] },
+      thread: { current: 'prior current', map: 'ns/x', history: [], drilldowns: [] },
       callTool,
     });
 
@@ -706,6 +815,164 @@ describe('runAskOrchestrator', () => {
     expect(result.ok).toBe(false);
     expect(result.errorMessage).toMatch(/cancelled/i);
     expect(callTool).not.toHaveBeenCalled();
+  });
+
+  test('show me the logs skips dot-ai and keeps Current', async () => {
+    const fetchStack = jest.fn(async () =>
+      stackResult({
+        current: 'Loki last 15m:\nboom',
+        drilldowns: [{ id: 'explore-logs', label: 'Explore logs', href: '/explore?q=1' }],
+      })
+    );
+    const callTool = jest.fn();
+    const result = await runAskOrchestrator({
+      tool: 'query',
+      question: 'show me the logs',
+      thread: emptyThread(),
+      fetchStack,
+      callTool,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.hops).toBe(0);
+    expect(callTool).not.toHaveBeenCalled();
+    expect(result.thread.current).toContain('boom');
+    expect(result.thread.drilldowns).toEqual([
+      { id: 'explore-logs', label: 'Explore logs', href: '/explore?q=1' },
+    ]);
+    expect(result.summary).toMatch(/Map links/i);
+  });
+
+  test('show me the logs fails when the Grafana stack read failed (no evidence to show)', async () => {
+    const fetchStack = jest.fn(async () => {
+      throw new Error('ds.query exploded');
+    });
+    const callTool = jest.fn();
+    const result = await runAskOrchestrator({
+      tool: 'query',
+      question: 'show me the logs',
+      thread: emptyThread(),
+      fetchStack,
+      callTool,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.errorMessage).toMatch(/Grafana stack read failed/);
+    expect(result.errorMessage).toMatch(/ds\.query exploded/);
+    expect(result.hops).toBe(0);
+    expect(callTool).not.toHaveBeenCalled();
+    expect(result.summary).not.toMatch(/Map links/i);
+  });
+
+  // B2a — "Send Grafana evidence" off (DotAIPage passes skipStack). loadStack returns early
+  // without setting stackLoadError, so a read-failure guard alone leaves a confident no-op:
+  // ok, Map links advertised, Current empty, dot-ai never called.
+  test('show me the logs fails when Grafana evidence is disabled in config', async () => {
+    const fetchStack = jest.fn(async () => stackResult());
+    const callTool = jest.fn();
+    const result = await runAskOrchestrator({
+      tool: 'query',
+      question: 'show me the logs',
+      thread: emptyThread(),
+      fetchStack,
+      callTool,
+      skipStack: true,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.errorMessage).toMatch(/Grafana evidence is disabled in plugin configuration/i);
+    expect(result.errorMessage).toMatch(/Send Grafana evidence/i);
+    expect(result.hops).toBe(0);
+    expect(fetchStack).not.toHaveBeenCalled();
+    expect(callTool).not.toHaveBeenCalled();
+    expect(result.summary).not.toMatch(/Map links/i);
+    expect(result.thread.drilldowns).toEqual([]);
+  });
+
+  // B2b — the read succeeded but carries nothing (no Loki datasource, or no lines in 15m) and
+  // no drilldown was rebuilt: pointing at Map links that do not exist is the same false claim.
+  test('show me the logs fails when the stack read is empty and there are no drilldowns', async () => {
+    const fetchStack = jest.fn(async () =>
+      stackResult({
+        current:
+          'Loki last 15m:\nLoki datasource missing\n\nPrometheus last 15m:\nPrometheus datasource missing\n\nTempo last 15m:\nTempo datasource missing\n\nAlertmanager:\nAlertmanager datasource missing',
+        mapHint: '',
+        logLines: [],
+        promLines: [],
+        currentEmpty: true,
+        drilldowns: [],
+      })
+    );
+    const callTool = jest.fn();
+    const result = await runAskOrchestrator({
+      tool: 'query',
+      question: 'show me the logs',
+      thread: emptyThread(),
+      fetchStack,
+      callTool,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.errorMessage).toMatch(/no Grafana evidence in the last 15m/i);
+    expect(result.hops).toBe(0);
+    expect(fetchStack).toHaveBeenCalledTimes(1);
+    expect(callTool).not.toHaveBeenCalled();
+    expect(result.summary).not.toMatch(/Map links/i);
+  });
+
+  // B2c — the read succeeded and Grafana IS configured (a Loki UID exists, so
+  // buildDrilldownLinks rebuilt an "Explore logs" link — see grafanaExplore.ts), but
+  // there are no evidence lines in the last 15m. drilldowns are built from configured
+  // datasource UIDs, not from query results, so a non-empty drilldowns list here does
+  // not mean there is anything in Current to point at. This is the realistic quiet-
+  // cluster shape the old `stackEmpty && drilldowns.length === 0` guard could not see,
+  // because it only fired when there were zero configured datasources.
+  test('show me the logs does not claim evidence in Current when the window is quiet but a datasource is configured', async () => {
+    const fetchStack = jest.fn(async () =>
+      stackResult({
+        current:
+          'Loki last 15m:\nno log lines in the last 15m\n\nPrometheus last 15m:\nno metric samples\n\nTempo last 15m:\nno traces\n\nAlertmanager:\nno alerts',
+        mapHint: 'Loki Loki',
+        logLines: [],
+        promLines: [],
+        currentEmpty: true,
+        drilldowns: [{ id: 'explore-logs', label: 'Explore logs', href: '/explore?q=1' }],
+      })
+    );
+    const callTool = jest.fn();
+    const result = await runAskOrchestrator({
+      tool: 'query',
+      question: 'show me the logs',
+      thread: emptyThread(),
+      fetchStack,
+      callTool,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.summary).not.toMatch(/evidence is in Current/i);
+    expect(result.errorMessage).toMatch(/no Grafana evidence lines/i);
+    expect(result.hops).toBe(0);
+    expect(callTool).not.toHaveBeenCalled();
+    // The links are still config-backed and still published — just not claimed as evidence.
+    expect(result.thread.drilldowns).toEqual([
+      { id: 'explore-logs', label: 'Explore logs', href: '/explore?q=1' },
+    ]);
+  });
+
+  test('a failed stack read clears drilldowns instead of publishing the previous asks links', async () => {
+    const fetchStack = jest.fn(async () => {
+      throw new Error('ds.query exploded');
+    });
+    const callTool = jest.fn();
+    const staleThread = {
+      ...emptyThread(),
+      drilldowns: [{ id: 'explore-logs', label: 'Explore logs', href: '/explore?q=prev' }],
+    };
+    const result = await runAskOrchestrator({
+      tool: 'query',
+      question: 'show me the logs',
+      thread: staleThread,
+      fetchStack,
+      callTool,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.errorMessage).toMatch(/Grafana stack read failed/);
+    expect(result.thread.drilldowns).toEqual([]);
   });
 });
 

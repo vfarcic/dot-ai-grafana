@@ -5,6 +5,7 @@ import { PluginPage } from '@grafana/runtime';
 import {
   Alert,
   Button,
+  Collapse,
   Field,
   Select,
   Spinner,
@@ -16,6 +17,7 @@ import { DotAITool } from '../utils/dotaiApi';
 import { ASK_CANCELLED_MESSAGE, askErrorTitle } from '../utils/askErrors';
 import { emptyThread, ToolThread } from '../utils/progressiveContext';
 import { runAskOrchestrator } from '../utils/askOrchestrator';
+
 
 const TOOL_OPTIONS: Array<SelectableValue<DotAITool>> = [
   { label: 'Query', value: 'query', description: 'Natural language cluster questions' },
@@ -36,7 +38,9 @@ function DotAIPage({ showContext = true, sendGrafanaEvidence = true }: DotAIPage
   const [intent, setIntent] = useState('');
   const [loading, setLoading] = useState(false);
   const [responseText, setResponseText] = useState('');
+  const [currentOpen, setCurrentOpen] = useState(false);
   const [error, setError] = useState<string | undefined>();
+
   const [threads, setThreads] = useState<Threads>({
     query: emptyThread(),
     remediate: emptyThread(),
@@ -265,17 +269,39 @@ function DotAIPage({ showContext = true, sendGrafanaEvidence = true }: DotAIPage
           </Alert>
         )}
 
-        {showContext && activeThread.current && (
-          <div className={styles.context} data-testid={testIds.dotai.current}>
-            <h3 className={styles.responseTitle}>Current</h3>
-            <pre className={styles.pre}>{activeThread.current}</pre>
+        {showContext && (activeThread.map || (activeThread.drilldowns && activeThread.drilldowns.length > 0)) && (
+          <div className={styles.context} data-testid={testIds.dotai.map}>
+            <h3 className={styles.responseTitle}>Map</h3>
+            {activeThread.drilldowns && activeThread.drilldowns.length > 0 && (
+              <div className={styles.drilldowns} data-testid={testIds.dotai.drilldown}>
+                {activeThread.drilldowns.map((link) => (
+                  <a
+                    key={link.id}
+                    className={styles.drilldownLink}
+                    href={link.href}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {link.label}
+                  </a>
+                ))}
+              </div>
+            )}
+            {activeThread.map && <pre className={styles.pre}>{activeThread.map}</pre>}
           </div>
         )}
 
-        {showContext && activeThread.map && (
-          <div className={styles.context} data-testid={testIds.dotai.map}>
-            <h3 className={styles.responseTitle}>Map</h3>
-            <pre className={styles.pre}>{activeThread.map}</pre>
+        {showContext && activeThread.current && (
+          <div className={styles.context} data-testid={testIds.dotai.current}>
+            <Collapse
+              label="Current (Grafana evidence)"
+              collapsible={true}
+              isOpen={currentOpen}
+              onToggle={() => setCurrentOpen(!currentOpen)}
+            >
+              <pre className={styles.pre}>{activeThread.current}</pre>
+            </Collapse>
+
           </div>
         )}
 
@@ -362,6 +388,15 @@ const getStyles = (theme: GrafanaTheme2) => ({
   responseTitle: css`
     margin: 0 0 ${theme.spacing(1)} 0;
     font-size: ${theme.typography.h5.fontSize};
+  `,
+  drilldowns: css`
+    display: flex;
+    flex-wrap: wrap;
+    gap: ${theme.spacing(1)};
+    margin-bottom: ${theme.spacing(1)};
+  `,
+  drilldownLink: css`
+    color: ${theme.colors.text.link};
   `,
   pre: css`
     margin: 0;

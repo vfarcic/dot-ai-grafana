@@ -31,7 +31,9 @@ const emptyStack = {
   tempoLines: [] as string[],
   alertLines: [] as string[],
   currentEmpty: false,
+  drilldowns: [] as Array<{ id: string; label: string; href: string }>,
 };
+
 
 
 async function selectTool(label: string) {
@@ -131,6 +133,7 @@ describe('Pages/DotAIPage', () => {
       tempoLines: [],
       alertLines: [],
       currentEmpty: false,
+      drilldowns: [],
     });
     mockCallDotAITool.mockResolvedValue({
       ok: true,
@@ -210,11 +213,12 @@ describe('Pages/DotAIPage', () => {
     render(<DotAIPage />);
     typeIntent('how is the cluster?');
     clickSubmit();
-
     expect(await screen.findByTestId(testIds.dotai.response)).toHaveTextContent('cluster looks healthy');
+    fireEvent.click(screen.getByText(/Current \(Grafana evidence\)/));
     expect(screen.getByTestId(testIds.dotai.current)).toHaveTextContent(/What's true now/i);
     expect(screen.getByTestId(testIds.dotai.history)).toHaveTextContent('You');
     expect(screen.getByTestId(testIds.dotai.history)).toHaveTextContent('cluster looks healthy');
+
     expect(screen.queryByTestId(testIds.dotai.error)).not.toBeInTheDocument();
   });
 
@@ -251,7 +255,9 @@ describe('Pages/DotAIPage', () => {
 
     expect(await screen.findByTestId(testIds.dotai.error)).toHaveTextContent('llm unavailable');
     expect(screen.getByTestId(testIds.dotai.retry)).toBeInTheDocument();
+    fireEvent.click(screen.getByText(/Current \(Grafana evidence\)/));
     expect(screen.getByTestId(testIds.dotai.current)).toHaveTextContent(/Loki last 15m/i);
+
     expect(screen.queryByTestId(testIds.dotai.history)).not.toBeInTheDocument();
   });
 
@@ -269,7 +275,7 @@ describe('Pages/DotAIPage', () => {
     clickSubmit();
 
     const alert = await screen.findByTestId(testIds.dotai.error);
-    expect(alert).toHaveTextContent('Ask stopped at the 120s limit per hop (up to 3 hops); retry or narrow the question.');
+    expect(alert).toHaveTextContent('Ask stopped at the 120s limit per hop');
     expect(alert).toHaveTextContent('Ask timed out');
   });
 
@@ -621,5 +627,27 @@ describe('Pages/DotAIPage', () => {
     expect(screen.getByTestId(testIds.dotai.consent)).toHaveTextContent(
       'Asks send Grafana datasource facts (Loki, Prometheus, Tempo, Alertmanager) to your configured dot-ai server.'
     );
+  });
+
+  test('show me the logs skips POST and renders Explore link', async () => {
+    mockFetchStackContext.mockResolvedValue({
+      ...emptyStack,
+      current: 'Loki last 15m:\nboom',
+      mapHint: 'Loki Loki',
+      logLines: ['boom'],
+      drilldowns: [{ id: 'explore-logs', label: 'Explore logs', href: '/explore?panes=x' }],
+    });
+
+    render(<DotAIPage />);
+    typeIntent('show me the logs');
+    clickSubmit();
+
+    expect(await screen.findByTestId(testIds.dotai.drilldown)).toBeInTheDocument();
+    const link = screen.getByRole('link', { name: 'Explore logs' });
+    expect(link).toHaveAttribute('href', '/explore?panes=x');
+    expect(mockCallDotAITool).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText(/Current \(Grafana evidence\)/));
+    expect(screen.getByTestId(testIds.dotai.current)).toHaveTextContent('boom');
+
   });
 });

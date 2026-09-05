@@ -3,6 +3,7 @@ import { testIds } from '../src/components/testIds';
 import {
   asEnvelope,
   isStableEnvelope,
+  PLUGIN_ID,
   resourcePath,
 } from './byDesignHelpers';
 
@@ -72,5 +73,66 @@ test.describe('Consent by design — no execute/operate surface', () => {
     const env = asEnvelope(json);
     expect(env.ok).toBe(true);
     expect(String(env.summary || '')).not.toMatch(/STUB_SAW_EXECUTE/i);
+  });
+
+  /**
+   * Consent runs both ways: with "Send Grafana evidence" off the plugin must not
+   * read a datasource — and must not then claim it did. A show-me navigation Ask
+   * has nothing to point at in that configuration, so it reports the disabled
+   * setting instead of an empty success with Map links that were never built.
+   *
+   * Zero-dial is measured at the plugin resource route (page.route counter): with
+   * evidence off the 0-hop path must not consult dot-ai either, so the operator
+   * gets a truthful failure rather than a fabricated navigation answer.
+   */
+  test('evidence off: a show-me Ask reports the disabled setting, not an empty success', async ({
+    gotoPage,
+    page,
+  }) => {
+    const settingsUrl = `/api/plugins/${PLUGIN_ID}/settings`;
+    const before = await page.request.get(settingsUrl);
+    expect(before.ok(), await before.text()).toBeTruthy();
+    const meta = await before.json();
+    const jsonData = (meta.jsonData ?? {}) as Record<string, unknown>;
+    const pluginState = { enabled: meta.enabled !== false, pinned: Boolean(meta.pinned) };
+
+    let toolCalls = 0;
+    await page.route(new RegExp(resourcePath('query')), async (route) => {
+      toolCalls += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ok: true, status: 200, summary: 'must not be reached', error: '' }),
+      });
+    });
+
+    await page.request.post(settingsUrl, {
+      data: { ...pluginState, jsonData: { ...jsonData, sendGrafanaEvidence: false } },
+    });
+
+    try {
+      await gotoPage('/');
+      // Toggle took effect: the evidence-consent disclosure is gone.
+      await expect(page.getByTestId(testIds.dotai.container)).toBeVisible();
+      await expect(page.getByTestId(testIds.dotai.consent)).toHaveCount(0);
+
+      await page.getByTestId(testIds.dotai.intent).fill('show me the logs');
+      const submit = page.getByTestId(testIds.dotai.submit);
+      await expect(submit).toBeEnabled();
+      await submit.click();
+
+      const error = page.getByTestId(testIds.dotai.error);
+      await expect(error).toBeVisible({ timeout: 10_000 });
+      await expect(error).toContainText(/Send Grafana evidence/i);
+
+      // No success surface: no answer, no Map links, no Current.
+      await expect(page.getByTestId(testIds.dotai.response)).toHaveCount(0);
+      await expect(page.getByTestId(testIds.dotai.drilldown)).toHaveCount(0);
+      await expect(page.getByTestId(testIds.dotai.current)).toHaveCount(0);
+      expect(toolCalls).toBe(0);
+    } finally {
+      // Restore the provisioned setting for every other spec in the run.
+      await page.request.post(settingsUrl, { data: { ...pluginState, jsonData } });
+    }
   });
 });

@@ -200,7 +200,7 @@ What shipped in the plugin PR. Original outline + earlier expansions stay above;
 | Config | Admin: **MCP Server URL**, **Auth Token**, **Debug Log** (off by default), **Show context** (on by default; display-only), **Send Grafana evidence** (`jsonData.sendGrafanaEvidence`, default on; independent of Show context). HTTPS required except loopback / RFC1918 / in-cluster `*.svc` / `*.cluster.local`. Test connection = `POST /api/v1/tools/version` |
 | Auth | `Authorization: Bearer` (not `X-Dot-AI-Authorization`) |
 | Grafana | `grafanaDependency: ">=11.0.0"`; `@grafana/*` **11.4.0**; CI Playwright on Grafana 11.0–13 + nightly |
-| Deferred | **M7 Map/Explore/show-me** → [PRD #3](https://github.com/LesleyMurfin/dot-ai-grafana/issues/23) / [PR #22](https://github.com/LesleyMurfin/dot-ai-grafana/pull/22) (0.2.x, not this PR). **GitOps execute** → [PRD #2](https://github.com/LesleyMurfin/dot-ai-grafana/issues/13) / [PR #18](https://github.com/LesleyMurfin/dot-ai-grafana/pull/18). Also: async 202; generated OpenAPI client; Grafana.com signing |
+| Deferred | **GitOps execute** → [PRD #2](https://github.com/LesleyMurfin/dot-ai-grafana/issues/13) / [PR #18](https://github.com/LesleyMurfin/dot-ai-grafana/pull/18). Also: async 202; generated OpenAPI client; Grafana.com signing |
 
 ```
   Ask
@@ -258,7 +258,7 @@ What shipped in the plugin PR. Original outline + earlier expansions stay above;
 
 Headlamp remains the operate/execute companion. Grafana v1 is diagnosis: **Grafana stack facts packed into the same intent**, then Grafana-first vs inventory-first hops, so Asks see the dashboards the operator is looking at.
 
-**Send Grafana evidence** (`jsonData.sendGrafanaEvidence`, default on; missing/undefined = send) is independent of **Show context**. When send is off, Asks do not pack Grafana DS facts (`fetchStackContext` / `loadStack` not called). No datasource UID pickers: types discovered via `getDataSourceSrv().getList({ type })`. Per-type checkboxes are future. Related alerts are already in **Current** from Alertmanager when send is on. Dashboard-to-open / Explore / show-me / markdown Answer are **not** this PR — [PRD #3](https://github.com/LesleyMurfin/dot-ai-grafana/issues/23). Grafana `/apis` dashboard inventory is later than PRD #3.
+**Send Grafana evidence** (`jsonData.sendGrafanaEvidence`, default on; missing/undefined = send) is independent of **Show context**. When send is off, Asks do not pack Grafana DS facts (`fetchStackContext` / `loadStack` not called). No datasource UID pickers: types discovered via `getDataSourceSrv().getList({ type })`. Per-type checkboxes are future. Related alerts are already in **Current** from Alertmanager when send is on. Dashboard-to-open / Explore / show-me ship in this PR (Map/Explore/show-me navigation surface, folded from PRD #3). Markdown Answer is **not** this PR — [PRD #3](https://github.com/LesleyMurfin/dot-ai-grafana/issues/23). Grafana `/apis` dashboard inventory is later than PRD #3.
 
 **Grafana APIs this plugin uses (existing host APIs — no custom Loki/Prom HTTP client):**
 
@@ -497,7 +497,7 @@ A `getBackendSrv().post(...resources...)` call crosses: browser fetch → Grafan
 - [x] **Documentation and installation guide** — README with setup instructions, configuration guide, and screenshots
 - [x] **Grafana version compatibility testing** — CI Playwright on Grafana **11.0–13 + nightly** (floor `>=11.0.0`, 11.4 libs). Not 9.x/10.x.
 
-As-built: M0–M6/M8–M9 cover v1; M7 not in v1. Floor is `grafanaDependency: ">=11.0.0"` (11.4 libs), not 10.x. See [As-built v1](#expansion-as-built-v1-this-contribution).
+As-built: M0–M9 cover v1. Floor is `grafanaDependency: ">=11.0.0"` (11.4 libs), not 10.x. See [As-built v1](#expansion-as-built-v1-this-contribution).
 
 ### Expansion: Phase 1 detail (M0–M9 mapping to the checklist above)
 
@@ -519,7 +519,7 @@ Grafana Assistant is unavailable. Built in five independently-reviewable stages:
 
 **Stage 1d — Firefighting UX & dashboard integration**
 - [x] **M6 — Shared layout.** Tool selector, placeholders, spinner, error `Alert`, Clear thread, Analyze this. Cancel + Retry shipped in v1; no elapsed timer.
-- [ ] **M7 — Dashboard deep-link.** **Not in v1.** Owned by [PRD #3](https://github.com/LesleyMurfin/dot-ai-grafana/issues/23) / [PR #22](https://github.com/LesleyMurfin/dot-ai-grafana/pull/22) (plugin 0.2.x). Do not land on vfarcic#3.
+- [x] **M7 — Map/Explore/show-me navigation surface.** Shipped in v1, folded from [PRD #3](https://github.com/LesleyMurfin/dot-ai-grafana/issues/23) / [PR #22](https://github.com/LesleyMurfin/dot-ai-grafana/pull/22).
 
 **Stage 1e — Ship**
 - [x] **M8 — Docs & install guide.** Product README: setup, config, unsigned allow-list, 120s timeout. No screenshot set / `changelog.d`.
@@ -592,16 +592,16 @@ Same rule for cheaper senses: registering **`mcp-grafana`** (Prom/Loki/Hubble) i
 Do **not** mix these into vfarcic/dot-ai-grafana#3. Unsigned alpha **0.1.0** is this file only.
 
 ```
-  PRD #1  this file / vfarcic#3 / fork #21     v1 0.1.0   analysis-only pack
+  PRD #1  this file / vfarcic#3 / fork #21     v1 0.1.0   analysis-only pack + Map/Explore/show-me
   PRD #2  issue #13 / fork #18                  post-v1    GitOps PR execute
-  PRD #3  issue #23 / fork #22                  0.2.x      Map / Explore / show-me
+  PRD #3  issue #23 / fork #22                  0.2.x      markdown Answer
 ```
 
 | PRD | GitHub | Owns | Does not own |
 |---|---|---|---|
-| **#1** (this file) | [vfarcic#3](https://github.com/vfarcic/dot-ai-grafana/pull/3) · [fork #21](https://github.com/LesleyMurfin/dot-ai-grafana/pull/21) | Query + analysis-only remediate, Current packing, 0.1.0 | Map `/d/uid`, Explore, show-me skip POST, markdown Answer, GitOps execute |
+| **#1** (this file) | [vfarcic#3](https://github.com/vfarcic/dot-ai-grafana/pull/3) · [fork #21](https://github.com/LesleyMurfin/dot-ai-grafana/pull/21) | Query + analysis-only remediate, Current packing, Map `/d/uid` / Explore / show-me navigation, 0.1.0 | markdown Answer, GitOps execute |
 | **#2** | [issue #13](https://github.com/LesleyMurfin/dot-ai-grafana/issues/13) · [PR #18](https://github.com/LesleyMurfin/dot-ai-grafana/pull/18) | GitOps PR execute | M7 Map, v1 packing |
-| **#3** | [issue #23](https://github.com/LesleyMurfin/dot-ai-grafana/issues/23) · [PR #22](https://github.com/LesleyMurfin/dot-ai-grafana/pull/22) | Map `/d/<uid>`, Explore/Drilldown, show-me skip POST, markdown Answer | GitOps execute, v1 0.1.0 |
+| **#3** | [issue #23](https://github.com/LesleyMurfin/dot-ai-grafana/issues/23) · [PR #22](https://github.com/LesleyMurfin/dot-ai-grafana/pull/22) | markdown Answer | Map/Explore/show-me (folded into PRD #1), GitOps execute, v1 0.1.0 |
 
 Fork [PR #16](https://github.com/LesleyMurfin/dot-ai-grafana/pull/16) (`feat/upstream-plugin` → `main`) is **not** a product split. Do not merge it as v1+M7.
 
@@ -659,7 +659,7 @@ Phases 2–3 are **proposed roadmap only** and are **not** part of original scop
 | Error handling and loading states | **M6** (cancel / retry / elapsed / alerts) |
 | Documentation and installation guide | **M8** |
 | Grafana version compatibility testing | **M9** (11.4 must-pass + current 13.x; **floor raised** — see deltas) |
-| *(new in this revision)* | **M7** dashboard→intent deep-link — **Not in v1**; [PRD #3](https://github.com/LesleyMurfin/dot-ai-grafana/issues/23) |
+| *(new in this revision)* | **M7** Map/Explore/show-me navigation surface — shipped in v1, folded from [PRD #3](https://github.com/LesleyMurfin/dot-ai-grafana/issues/23) |
 
 ### Deliberate deltas from the original draft (please confirm or redirect)
 
@@ -735,3 +735,9 @@ Phases 2–3 are **proposed roadmap only** and are **not** part of original scop
 
 - **Issue**: M7 extras and GitOps execute had fork PRs but PRD #1 did not point at them, so the split was invisible on vfarcic#3.
 - **Action**: Deferred / M7 / as-built rows now name [PRD #2](https://github.com/LesleyMurfin/dot-ai-grafana/issues/13) and [PRD #3](https://github.com/LesleyMurfin/dot-ai-grafana/issues/23). Related-PRDs table. No Map/Explore/show-me content added here.
+
+### 2026-09-05 — M7 folded back into v1
+
+- **Issue**: Branch reshaping dropped the PRD edits that had split M7 Map/Explore/show-me into PRD #3; the plugin code on this PR (`grafanaExplore.ts`, `DotAIPage.tsx` drilldown, `testIds.drilldown`, show-me routing) now ships the navigation surface directly, but the As-built/Deferred/roadmap/related-PRDs text still read it as deferred to PRD #3 / PR #22.
+- **Action**: As-built Deferred row, M7 checkbox, As-built summary line, release-ladder diagram, related-PRDs table, and original-milestone mapping now record Map/Explore/show-me as shipped in v1 (folded from PRD #3). PRD #3 retains only markdown Answer. Text-only-responses language (CLAUDE.md, ResponseMarkdown) is untouched — that decision is retired on PR #51, not here.
+- **Prompt**: keep the updated PRD on this PR (#13).
