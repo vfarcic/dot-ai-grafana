@@ -251,7 +251,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
 
         <Field
           label="Send Grafana evidence"
-          description="When on, Query packs Loki/Prometheus/Tempo/Alertmanager into the Ask. Off = question text only. On by default."
+          description="When on, Query reads Loki/Prometheus/Tempo/Alertmanager and packs those facts into the Ask. When off, no datasource is read — the question, the session Current summary, Map of resource names, and the condensed Prior block (up to 240 chars of earlier questions and answers, where the question side can also carry follow-up instructions this page adds automatically) are still sent. On by default."
           className={s.marginTop}
         >
           <span>

@@ -92,9 +92,9 @@ Subtests listed for navigation; the contract count is the 13 top-level funcs.
 
 - renders intent field and submit button
 - can switch tool selection to Remediate (analysis only)
-- submit calls query with Stable+stack Current and History is not in POST body
+- submit calls query with Stable+stack Current and no Prior on first turn
 - Query Current includes mocked Grafana stack log lines before callDotAITool
-- follow-up packs Current into intent and still omits History from body
+- follow-up packs Current and condensed Prior into intent
 - success path renders response summary and Current rewrite
 - ok with empty summary shows fallback text
 - error path shows error message without History rewrite; stack Current may remain
@@ -137,7 +137,7 @@ Subtests listed for navigation; the contract count is the 13 top-level funcs.
 **`src/utils/progressiveContext.test.ts`** — describe `progressiveContext` (9 tests)
 
 - stable preamble distinguishes query vs remediate analysis-only
-- buildRequestText sends Stable+Current+Map+box and omits History
+- buildRequestText sends Stable+Current+Prior+Map+box (Prior condensed from history; omitted when empty)
 - buildRequestText first turn is Stable + Question only
 - buildRequestText remediate uses Issue label
 - rewriteCurrent replaces with capped block including resources and next

@@ -16,6 +16,12 @@ HIT COUNTERS: every POST bumps a per-tool counter and, when the body carries a
 so e2e deny-path specs can assert "403 with no upstream dial" as a measurement
 instead of an inference. Per-probe counters are what deny tests assert on: the
 suite runs fullyParallel, so per-tool totals move under allow-path tests.
+
+INTENT RECORDER: the last ``_INTENT_LOG_MAX`` query/remediate request texts are
+kept in memory and served from GET /intents, so a consent/privacy spec can assert
+what was actually POSTed (e.g. whether a ``Prior:`` block carrying prior-turn text
+left the browser) instead of trusting the UI's own claim about it. Bodies are
+already test fixtures; nothing here is durable storage.
 """
 
 from __future__ import annotations
@@ -45,6 +51,23 @@ _hits: dict[str, int] = {
 # Per-request dial probes: DIALPROBE-<id> tokens seen in any POST body.
 _probes: dict[str, int] = {}
 _PROBE_RE = re.compile(r"DIALPROBE-[A-Za-z0-9_-]+")
+# Last N query/remediate request texts, newest last: what actually left the browser.
+_INTENT_LOG_MAX = 40
+_intents: list[dict[str, object]] = []
+
+
+def _record_intent(tool: str, text: str, body: dict) -> None:
+    with _lock:
+        _intents.append(
+            {
+                "tool": tool,
+                "text": text,
+                "len": len(text),
+                "keys": sorted(body.keys()),
+            }
+        )
+        if len(_intents) > _INTENT_LOG_MAX:
+            del _intents[: len(_intents) - _INTENT_LOG_MAX]
 
 
 def _bump(path: str) -> None:
@@ -106,6 +129,11 @@ class Handler(BaseHTTPRequestHandler):
                 probes = dict(_probes)
             self._write(200, {"ok": True, "hits": hits, "probes": probes})
             return
+        if self.path.split("?", 1)[0] == "/intents":
+            with _lock:
+                intents = [dict(entry) for entry in _intents]
+            self._write(200, {"ok": True, "intents": intents})
+            return
         self._write(404, {"error": {"message": "not found"}})
 
     def do_POST(self) -> None:
@@ -164,6 +192,7 @@ class Handler(BaseHTTPRequestHandler):
         self._write(404, {"error": {"message": f"unknown path {path}"}})
 
     def _handle_tool(self, text: str, body: dict, tool: str) -> None:
+        _record_intent(tool, text, body)
         if "TRIGGER_UPSTREAM_5XX" in text:
             self._write(
                 503,

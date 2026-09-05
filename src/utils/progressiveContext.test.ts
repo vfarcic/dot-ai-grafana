@@ -5,6 +5,8 @@ import {
   MAX_CURRENT_CHARS,
   MAX_HISTORY_TURNS,
   MAX_INTENT_CHARS,
+  MAX_MAP_CHARS,
+  MAX_PRIOR_CHARS,
   MIN_CURRENT_CHARS,
   mergeMap,
   rewriteCurrent,
@@ -73,12 +75,13 @@ describe('progressiveContext', () => {
     expect(stablePreamble('remediate')).toMatch(/do not apply/i);
   });
 
-  test('buildRequestText sends Stable+Current+Map+box and omits History', () => {
+  test('buildRequestText sends Stable+Current+Map+box without Prior when history empty', () => {
     const text = buildRequestText({
       tool: 'query',
       current: 'pod/checkout-api is CrashLooping',
       map: 'pod/checkout-api, ns/prod',
       box: 'why is it restarting?',
+      history: [],
     });
 
     expect(text).toContain(stablePreamble('query'));
@@ -88,10 +91,149 @@ describe('progressiveContext', () => {
     expect(text).toContain('pod/checkout-api, ns/prod');
     expect(text).toContain('Question:');
     expect(text).toContain('why is it restarting?');
-    // History must never appear in the packed POST body text
-    expect(text).not.toMatch(/\bHistory\b/i);
+    // Empty history → no Prior block (first-turn behaviour unchanged)
+    expect(text).not.toMatch(/\bPrior:/);
     expect(text).not.toMatch(/\bYou:/);
-    expect(text).not.toMatch(/\bAnswer:/);
+  });
+
+  test('buildRequestText follow-up Prior keeps referent from previous turn', () => {
+    const history = appendHistory(
+      [],
+      'show failing pods in prod',
+      'The first failing pod is checkout-api in namespace prod (CrashLoopBackOff). payment-worker is also failing.'
+    );
+    const text = buildRequestText({
+      tool: 'query',
+      current: 'Loki last 15m:\nerror CrashLoopBackOff',
+      map: 'ns/prod',
+      box: "what's wrong with the first one",
+      history,
+    });
+
+    expect(text).toContain('Prior:');
+    // Referent from the prior answer must survive condensation
+    expect(text).toMatch(/checkout-api/);
+    expect(text).toContain("what's wrong with the first one");
+    expect(text.length).toBeLessThanOrEqual(MAX_INTENT_CHARS);
+  });
+
+  test('buildRequestText long history + long Current stays ≤ MAX_INTENT_CHARS', () => {
+    let history = appendHistory([], 'q0 show pods', `answer0 ${'z'.repeat(400)} pod/alpha-api in ns/prod`);
+    history = appendHistory(history, 'q1 status of first', `answer1 ${'y'.repeat(400)} pod/beta-api CrashLooping`);
+    history = appendHistory(history, 'q2 and the second', `answer2 ${'x'.repeat(400)} pod/gamma-api OOMKilled`);
+
+    const lokiLines = Array.from({ length: 80 }, (_, i) => `error-line-${i} ${'w'.repeat(40)}`).join('\n');
+    const current = [
+      'Loki last 15m (pod/gamma-api ns/prod):',
+      lokiLines,
+      '',
+      'Prometheus last 15m:',
+      'pod/gamma-api ns/prod restarts=9',
+      '',
+      'Tempo last 15m:',
+      Array.from({ length: 20 }, (_, i) => `trace ${'a'.repeat(32)}${i}`).join('\n'),
+      '',
+      'Alertmanager:',
+      'KubePodCrashLooping firing',
+    ].join('\n');
+
+    expect(current.length).toBeGreaterThan(MAX_INTENT_CHARS);
+    expect(history.length).toBe(MAX_HISTORY_TURNS);
+
+    const text = buildRequestText({
+      tool: 'query',
+      current,
+      map: 'm'.repeat(MAX_MAP_CHARS),
+      box: 'why is the latest one failing?',
+      history,
+    });
+
+    expect(text.length).toBeLessThanOrEqual(MAX_INTENT_CHARS);
+    expect(text).toContain('Question:');
+    expect(text).toContain('why is the latest one failing?');
+  });
+
+  test('buildRequestText drops Map before Prior when over budget', () => {
+    const history = appendHistory(
+      [],
+      'show failing pods in prod',
+      'first failing pod is checkout-api in namespace prod'
+    );
+    // Large Current that forces truncation but still leaves room for a short Prior
+    // after Map is dropped and Tempo is removed.
+    const lokiBody = Array.from({ length: 25 }, (_, i) => `log-${i}-${'y'.repeat(28)}`).join('\n');
+    const tempoBody = Array.from({ length: 40 }, (_, i) => `trace-${i}-${'z'.repeat(36)}`).join('\n');
+    const current = [
+      'Loki last 15m:',
+      lokiBody,
+      '',
+      'Prometheus last 15m:',
+      'restarts=3',
+      '',
+      'Tempo last 15m:',
+      tempoBody,
+      '',
+      'Alertmanager:',
+      'firing',
+    ].join('\n');
+    const map = 'chip/'.repeat(80); // well over MAX_MAP_CHARS once merged; raw long map
+
+    const text = buildRequestText({
+      tool: 'query',
+      current,
+      map,
+      box: 'what about the first one?',
+      history,
+    });
+
+    expect(text.length).toBeLessThanOrEqual(MAX_INTENT_CHARS);
+    // Map dropped first; Prior retained with the referent
+    expect(text).not.toContain('\nMap:\n');
+    expect(text).toContain('Prior:');
+    expect(text).toMatch(/checkout-api/);
+  });
+
+  test('MAX_PRIOR_CHARS and intent caps were not raised', () => {
+    expect(MAX_INTENT_CHARS).toBe(1000);
+    expect(MAX_CURRENT_CHARS).toBe(700);
+    expect(MAX_MAP_CHARS).toBe(400);
+    expect(MAX_PRIOR_CHARS).toBe(240);
+  });
+
+  test('buildRequestText caps the Prior block it actually emits at MAX_PRIOR_CHARS, not just the constant', () => {
+    // Astral characters are surrogate pairs; sliceUnits must not cut mid-pair or the
+    // truncated tail would carry a lone surrogate (renders as U+FFFD).
+    const astral = '𝕏😀🔥🚀'.repeat(20);
+    let history = appendHistory(
+      [],
+      `show pods failing in prod ${astral} ${'q'.repeat(300)}`,
+      `pod/alpha-api is CrashLooping in ns/prod ${astral} ${'a'.repeat(300)}`
+    );
+    history = appendHistory(
+      history,
+      `and what about pod beta in prod ${astral} ${'q'.repeat(300)}`,
+      `pod/beta-api is OOMKilled in ns/prod ${astral} ${'a'.repeat(300)}`
+    );
+
+    const text = buildRequestText({
+      tool: 'query',
+      current: 'pod/gamma-api is Running',
+      map: 'ns/prod',
+      box: 'status of pod gamma?',
+      history,
+    });
+
+    expect(text.length).toBeLessThanOrEqual(MAX_INTENT_CHARS);
+
+    // Extract the Prior block the way a consumer of the wire text would: everything
+    // between the "Prior:" label and the next section (or Question/Issue if Map was
+    // dropped). This is the bound the PR exists to guarantee — the emitted bytes,
+    // not the MAX_PRIOR_CHARS constant asserted above.
+    const match = text.match(/Prior:\n([\s\S]*?)\n\n(?:Map:|Question:|Issue:)/);
+    expect(match).not.toBeNull();
+    const priorBlock = match![1];
+    expect(priorBlock.length).toBeGreaterThan(0);
+    expect(priorBlock.length).toBeLessThanOrEqual(MAX_PRIOR_CHARS);
   });
 
   test('buildRequestText first turn is Stable + Question only', () => {
@@ -114,7 +256,7 @@ describe('progressiveContext', () => {
     expect(text).toContain(stablePreamble('remediate'));
     expect(text).toContain('Issue:');
     expect(text).toContain('analyze crash');
-    expect(text).not.toMatch(/\bHistory\b/i);
+    expect(text).not.toMatch(/\bPrior:/);
   });
 
   test('buildRequestText packs huge Current to ≤ MAX_INTENT_CHARS', () => {

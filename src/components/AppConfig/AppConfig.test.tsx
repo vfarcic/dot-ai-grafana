@@ -335,4 +335,27 @@ describe('Components/AppConfig', () => {
       sendGrafanaEvidence: false,
     });
   });
+
+  /**
+   * The description under this switch is one of only two places the product tells an
+   * operator what leaves the browser. It said "Off = question text only", which stopped
+   * being true once prior-turn content was packed: `skipStack` suppresses the datasource
+   * read, not Prior, Map or the rewritten Current.
+   */
+  test('Send Grafana evidence description states what off does NOT cover', () => {
+    // @ts-ignore
+    render(<AppConfig plugin={props.plugin} query={props.query} />);
+
+    const description = screen
+      .getByText(/When on, Query reads Loki\/Prometheus\/Tempo\/Alertmanager/)
+      .textContent!;
+
+    expect(description).not.toMatch(/question text only/i);
+    expect(description).toMatch(/When off, no datasource is read/);
+    expect(description).toMatch(/the session Current summary/);
+    expect(description).toMatch(/Map of resource names/);
+    expect(description).toMatch(
+      /condensed Prior block \(up to 240 chars of earlier questions and answers, where the question side can also carry follow-up instructions this page adds automatically\) are still sent/
+    );
+  });
 });

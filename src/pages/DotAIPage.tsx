@@ -161,15 +161,15 @@ function DotAIPage({ showContext = true, sendGrafanaEvidence = true }: DotAIPage
   return (
     <PluginPage>
       <div className={styles.wrap} data-testid={testIds.dotai.container}>
-        {sendGrafanaEvidence && (
-          <Alert
-            title="Grafana evidence"
-            severity="info"
-            data-testid={testIds.dotai.consent}
-          >
-            Asks send Grafana datasource facts (Loki, Prometheus, Tempo, Alertmanager) to your configured dot-ai server.
-          </Alert>
-        )}
+        <Alert
+          title={sendGrafanaEvidence ? 'What each Ask sends' : 'What each Ask sends (Grafana evidence off)'}
+          severity="info"
+          data-testid={testIds.dotai.consent}
+        >
+          {sendGrafanaEvidence
+            ? 'Asks POST to your configured dot-ai server: your question, the session Current summary and Map of resource names, and a condensed Prior block of up to 240 characters built from your earlier questions and dot-ai\u2019s earlier answers (the question side can also carry follow-up instructions this page adds automatically). Query Asks that need live data replace Current with Grafana datasource facts read at that moment (Loki, Prometheus, Tempo, Alertmanager) instead of sending both; Remediate Asks read no datasource. Answers quote log, metric and alert lines verbatim, so anything credential-shaped in them is sent too. Full History stays in this browser.'
+            : 'Send Grafana evidence is off, so Asks read no datasource. Asks still POST your question, the session Current summary and Map of resource names, and a condensed Prior block of up to 240 characters built from your earlier questions and dot-ai\u2019s earlier answers (the question side can also carry follow-up instructions this page adds automatically) \u2014 both quote log, metric and alert lines verbatim. The toggle does not cover Prior, Current or Map. Full History stays in this browser.'}
+        </Alert>
         {tool === 'remediate' && (
           <Alert title="Analysis only" severity="info">
             Remediate never executes changes. For operate/execute, use the Headlamp plugin.

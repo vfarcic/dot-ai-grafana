@@ -81,6 +81,33 @@ export async function stubHealth(): Promise<StubHealth> {
   return { hits: body.hits, probes: body.probes ?? {} };
 }
 
+export type StubIntent = {
+  /** Tool the plugin proxied to (`query` / `remediate`). */
+  tool: string;
+  /** The packed `{intent}` / `{issue}` text as it arrived upstream. */
+  text: string;
+  len: number;
+  /** Top-level request-body keys, so a spec can assert the allowlist. */
+  keys: string[];
+};
+
+/**
+ * Request texts the stub actually received (GET /intents, newest last). This is the
+ * measurement behind consent specs: what the on-page notice claims is POSTed has to
+ * match what left the browser, not what the UI says about itself.
+ */
+export async function stubIntents(): Promise<StubIntent[]> {
+  const resp = await fetch(`${STUB_BASE_URL}/intents`);
+  if (!resp.ok) {
+    throw new Error(`dot-ai stub /intents returned HTTP ${resp.status} at ${STUB_BASE_URL}`);
+  }
+  const body = (await resp.json()) as { intents?: StubIntent[] };
+  if (!body || !Array.isArray(body.intents)) {
+    throw new Error(`dot-ai stub /intents payload has no intents array: ${JSON.stringify(body)}`);
+  }
+  return body.intents;
+}
+
 /** Unique per-request dial probe token, planted in the request body. */
 export function dialProbe(label: string): string {
   return `DIALPROBE-${label}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;

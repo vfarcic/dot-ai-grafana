@@ -194,10 +194,10 @@ What shipped in the plugin PR. Original outline + earlier expansions stay above;
 | Tools | Query (`intent`) + Remediate analysis-only (`issue` / mapped `intent`). No execute / operate / recommend UI |
 | Client | Thin Grafana SDK `httpclient` for query, remediate, version only. **No** generated OpenAPI client (full schema includes mutation tools) |
 | Timeouts | Probe/version **15s**; query/remediate **120s** blocking. **No** async `202` + job poll |
-| UI | Tool select, intent box, Ask/Analyze, **Cancel** while in flight, spinner, error `Alert` with **Retry** (intent preserved). Titles: timeout / 401 / 403 / 404 / unreachable / cancelled. Analysis-only banner on Remediate. Current/Map/History gated by Show context (display-only). Packing gated by **Send Grafana evidence** (default on). Consent info Alert on Ask when send is on. |
+| UI | Tool select, intent box, Ask/Analyze, **Cancel** while in flight, spinner, error `Alert` with **Retry** (intent preserved). Titles: timeout / 401 / 403 / 404 / unreachable / cancelled. Analysis-only banner on Remediate. Current/Map/History gated by Show context (on-page panels only). Packing gated by **Send Grafana evidence** (default on). Intent also carries a condensed **Prior:** block (≤240 chars) from recent turns inside the 1000-char budget. Consent info Alert on Ask when send is on. |
 | Ask log | **Debug Log** (`jsonData.debugLog`, off by default): JSONL ask log. Failed tool calls also go to Grafana plugin **error log** (`log.DefaultLogger.Error`, no tokens/body). |
 | vs Headlamp / core | Headlamp Query = box → one POST. Resource-detail passes the **K8s object** into remediate/operate. `sessionId` is the **execute** round-trip, not Grafana DS packing. No Loki/Prom/Tempo/AM in `dot-ai-headlamp`. Closest core plan: [vfarcic/dot-ai#463](https://github.com/vfarcic/dot-ai/issues/463) (Low, draft — evaluate external monitoring MCP). This packing is Grafana-host glue |
-| Config | Admin: **MCP Server URL**, **Auth Token**, **Debug Log** (off by default), **Show context** (on by default; display-only), **Send Grafana evidence** (`jsonData.sendGrafanaEvidence`, default on; independent of Show context). HTTPS required except loopback / RFC1918 / in-cluster `*.svc` / `*.cluster.local`. Test connection = `POST /api/v1/tools/version` |
+| Config | Admin: **MCP Server URL**, **Auth Token**, **Debug Log** (off by default), **Show context** (on by default; on-page panels only, does not control packing), **Send Grafana evidence** (`jsonData.sendGrafanaEvidence`, default on; independent of Show context). HTTPS required except loopback / RFC1918 / in-cluster `*.svc` / `*.cluster.local`. Test connection = `POST /api/v1/tools/version` |
 | Auth | `Authorization: Bearer` (not `X-Dot-AI-Authorization`) |
 | Grafana | `grafanaDependency: ">=11.0.0"`; `@grafana/*` **11.4.0**; CI Playwright on Grafana 11.0–13 + nightly |
 | Deferred | **M7 Map/Explore/show-me** → [PRD #3](https://github.com/LesleyMurfin/dot-ai-grafana/issues/23) / [PR #22](https://github.com/LesleyMurfin/dot-ai-grafana/pull/22) (0.2.x, not this PR). **GitOps execute** → [PRD #2](https://github.com/LesleyMurfin/dot-ai-grafana/issues/13) / [PR #18](https://github.com/LesleyMurfin/dot-ai-grafana/pull/18). Also: async 202; generated OpenAPI client; Grafana.com signing |
@@ -215,7 +215,7 @@ What shipped in the plugin PR. Original outline + earlier expansions stay above;
       (no hardcoded uids; types via getDataSourceSrv().getList({type}); skip when sendGrafanaEvidence is false)
          |
          v
-      Current + Map     History stays on screen — never POSTed
+      Current + Map + condensed Prior (≤240 chars in 1000-char budget; shed under pressure)
          |
          v
       classifyFirstHop(question)
@@ -228,7 +228,7 @@ What shipped in the plugin PR. Original outline + earlier expansions stay above;
          +--------------+---------------+
                         v
       hop 1  POST /query
-             intent = Stable + Current + Map + question
+             intent = Stable + Current + Prior + Map + question
                         |
          +--------------+--------------+
          | unscoped (no pod/ns/app)?   | answer denies facts in Current?
@@ -271,7 +271,7 @@ Headlamp remains the operate/execute companion. Grafana v1 is diagnosis: **Grafa
            │       .get(uid)
            │       ds.query(DataQueryRequest)   ← same path as Explore
            ▼
-  Current + Map packed into {intent}     History never POSTed
+  Current + Map + condensed Prior packed into {intent}
            │
            │  2. Grafana plugin resource API (existing)
            │     getBackendSrv().fetch
@@ -305,7 +305,7 @@ Not used: Grafana Assistant, LLM app plugin, `mcp-grafana` (engine-side: vfarcic
 |---|---|---|---|
 | **Reliability** | Partial | Fail-fast config + Test connection; hop cap 3; Cancel; Retry; stack DS throw isolated; 120s classified timeout | No async 202 — long remediate can still hit 120s |
 | **Security** | Partial | Token in `secureJsonData` (backend only); remediate allowlist (no execute); 401/403 → 502 no secret leak; no generated OpenAPI client; Debug Log off by default; public `http` rejected | `http` only for loopback, RFC1918, or in-cluster DNS (`*.svc` / `*.cluster.local`); shared Bearer (any user who can open the plugin); Current/logs go to the LLM when send is on |
-| **Privacy** | Partial | History never POSTed; error log has no body/token; Debug Log opt-in; **Send Grafana evidence** opt-out | Show context is still display-only (does not stop packing) |
+| **Privacy** | Partial | Condensed Prior (≤240 chars) may leave the browser inside intent; full History stays on screen; error log has no body/token; Debug Log opt-in; **Send Grafana evidence** opt-out | Show context toggles on-page panels only (does not stop packing) |
 | **Consent** | Partial | Admin configures; user clicks Ask; Debug Log opt-in; analysis-only banner; info Alert on Ask when send is on (Asks send Grafana DS facts to the configured dot-ai server); banner hidden when send is off | Grafana users share one token; no per-user consent / OAuth |
 
 ## User Journey
@@ -356,7 +356,7 @@ Grafana admin configures via plugin settings:
 - **MCP Server URL** — `jsonData.apiUrl` (absolute http(s) base, no `/api/v1` suffix). HTTPS required except loopback / RFC1918 / in-cluster `*.svc` / `*.cluster.local`. Public `http` is rejected.
 - **Auth Token** — `secureJsonData.apiKey` (Bearer; stored encrypted)
 - **Debug Log** — `jsonData.debugLog` enable/disable the JSONL ask log (`/var/lib/grafana/dotai-ask.log`). **Off by default.** Tokens never written; hop meta stripped before upstream.
-- **Show context** — `jsonData.showContext` show Current, Map, and History on the page. **On by default.** Display-only; independent of Send Grafana evidence.
+- **Show context** — `jsonData.showContext` show Current, Map, and History panels on the page. **On by default.** On-page display only; independent of Send Grafana evidence. Does not control intent packing (Current/Map/Prior).
 - **Send Grafana evidence** — `jsonData.sendGrafanaEvidence`. **On by default** (missing/undefined = send). When off, do not pack Grafana DS facts into Asks. Independent of Show context.
 
 ### UI Components
@@ -514,7 +514,7 @@ Grafana Assistant is unavailable. Built in five independently-reviewable stages:
 - [x] **M3 — Backend proxy (Go).** `/query`, `/remediate`, `/health`, `/test-connection`; SDK `httpclient`; remediate field allowlist; token never logged. **No** `/status/{jobId}` (no 202).
 
 **Stage 1c — Intelligence surfaces**
-- [x] **M4 — Query UI.** Plain-text `summary`. Grafana DS **Current/Map** packed into `{intent}`; History display-only. No cluster-context chip, raw-response toggle, or char counter in v1.
+- [x] **M4 — Query UI.** Plain-text `summary`. Grafana DS **Current/Map** packed into `{intent}`; condensed **Prior:** from recent turns (≤240 chars inside 1000-char budget). Full History on screen. No cluster-context chip, raw-response toggle, or char counter in v1.
 - [x] **M5 — Remediate analysis UI.** Analysis text; **no execution surfaced** (allowlist drops execute/apply tokens). Single hop; reuses Query Current.
 
 **Stage 1d — Firefighting UX & dashboard integration**
