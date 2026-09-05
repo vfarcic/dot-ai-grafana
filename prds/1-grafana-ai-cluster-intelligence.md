@@ -54,7 +54,7 @@ A Grafana App Plugin that embeds two read-only dot-ai tools directly into Grafan
 1. **Query** — Natural language questions about Kubernetes cluster resources
 2. **Remediate (Analysis Only)** — AI-powered issue analysis without execution capability
 
-The plugin provides a simple text-based interface: tool selector, text input for the intent, and a text area displaying the agent's response. No rich visualizations (Mermaid, cards, tables) — just plain text responses.
+The plugin provides a simple interface: tool selector, text input for the intent, and a response area that renders the model's own GFM markdown (headings, lists, tables, code blocks, links) as sanitized HTML. **Amendment (2026-09-05, Design Decision 12):** this retires the *rendering* half of the original text-only decision only — the plugin still never requests rich visualizations from dot-ai (no `[visualization]` prefix; see the tool→endpoint map below and Design Decision 1).
 
 ### Expansion: Tool → endpoint map
 
@@ -81,7 +81,7 @@ dot-ai wraps every REST response in a standard envelope:
 
 dot-ai's tools are built for an *LLM agent*, so `data.result` carries **structured JSON plus agent-oriented fields** (`agentInstructions`, `sessionId`), not a prose string. The plugin extracts the human-readable content per tool (confirmed against source and against how `dot-ai-headlamp` unwraps `data.result`):
 
-| Tool | Render as text | Ignore in the text-only UI |
+| Tool | Render (as markdown) | Ignore in the UI |
 |------|----------------|-----------------------------|
 | `query` | **`data.result.summary`** (`QueryOutput.summary`, `src/tools/query.ts` L54) | `agentInstructions`, `sessionId`, `visualizationUrl`, `iterations`, `toolsUsed` |
 | `remediate` | `message`, `analysis.rootCause`, `analysis.confidence`, `analysis.factors[]`, `remediation.summary`, `remediation.actions[]` (`command`/`rationale`/`risk`), `guidance` | `executionChoices`, `nextAction`, `sessionId`, `visualizationUrl`, `agentInstructions` |
@@ -182,6 +182,7 @@ That is **not** Kubeshark/PCAP and **not** this Grafana UI — it is what makes 
 9. **Strategic positioning vs Grafana Assistant (read-only scope).** Grafana Assistant + Sift now cover NL analysis of telemetry natively, so this plugin must lead with dot-ai's wedge — **K8s API state, remediation, sovereignty** (see [Competitive landscape](#competitive-landscape--differentiation)). **Leaning:** v1 honors PRD #1's read-only scope and differentiates on **K8s-state + sovereign self-hosting** (not a telemetry-chat clone); **remediation** (GitOps PR) is the strongest differentiator but is out of PRD #1 scope — flagged as the highest-value expansion and the central go/no-go ([Open Question 6](#open-questions)). If neither wedge is compelling for the target users, the honest call is **not** to ship a standalone plugin and instead expose dot-ai via a Grafana Assistant Skill / the Grafana MCP.
 10. **Deployment target: self-managed Grafana only for this contribution.** **Leaning:** design, CI, and install docs target **self-managed Grafana** (reference **11.4**; matrix includes a current 13.x). **Grafana Cloud is explicitly not planned** for this PRD's delivery track — see [Deployment targets](#deployment-targets-self-managed-vs-grafana-cloud). Cloud may still matter to other adopters (including the maintainer); it is left as an optional follow-on for whoever finds value, not a Phase 1/2/3 commitment here.
 11. **Companion vs core ownership.** **Leaning:** this PRD follows the Headlamp companion pattern — UI/host only; capabilities land in **dot-ai** first. Applies especially to **Kubeshark / evidence** (Phase 3): see [Where Kubeshark connectivity lives](#where-kubeshark-connectivity-lives).
+12. **Markdown rendering vs. text-only — RESOLVED, amends Decision 1.** The original text-only decision banned both *requesting* and *rendering* rich visualizations. Only the rendering half is retired: the response area now renders the model's own GFM markdown (headings, lists, tables, code blocks, links) as sanitized HTML instead of a plain-text area. The request half is unchanged — the plugin still never prefixes `[visualization]` to the intent (Decision 1); dot-ai is never asked to switch into rich-visualization mode. See Work Log 2026-09-05.
 
 ### Expansion: As-built v1 (this contribution)
 
@@ -370,7 +371,7 @@ Minimal UI surface:
 
 ### What's Explicitly Out of Scope
 
-- Rich visualizations (Mermaid diagrams, cards, code blocks with syntax highlighting)
+- Rich visualizations *requested from dot-ai* (Mermaid diagrams, cards, charts) — the plugin never prefixes `[visualization]` to the intent (Decision 1). It does render the model's own GFM markdown, including code blocks with syntax highlighting, as sanitized HTML (Decision 12, amends this line for rendering only).
 - Action execution (remediation execution, operate, recommend)
 - Multi-stage workflows or wizards
 - Resource selection from dashboards
@@ -735,3 +736,9 @@ Phases 2–3 are **proposed roadmap only** and are **not** part of original scop
 
 - **Issue**: M7 extras and GitOps execute had fork PRs but PRD #1 did not point at them, so the split was invisible on vfarcic#3.
 - **Action**: Deferred / M7 / as-built rows now name [PRD #2](https://github.com/LesleyMurfin/dot-ai-grafana/issues/13) and [PRD #3](https://github.com/LesleyMurfin/dot-ai-grafana/issues/23). Related-PRDs table. No Map/Explore/show-me content added here.
+
+### 2026-09-05 — retire text-only decision for rendering only
+
+- **Issue**: PRD line 57, the "What's Explicitly Out of Scope" list, the tool→endpoint response table, and CLAUDE.md's Key Design Decisions still banned rich visualizations outright (Mermaid, cards, tables, syntax-highlighted code) at the presentation layer, but a companion PR renders the model's own GFM markdown (tables, headings, code, links). Raised as blocking finding B4 on review of PR #13: Decision 12 there recorded "navigation extras returning" but not that the text-only decision itself was being retired.
+- **Action**: Amended PRD line 57, the out-of-scope bullet, and the response-table header; added Design Decision 12 recording that only the *rendering* half of the original text-only decision (Decision 1) is retired — sanitized markdown rendering is now in scope. The *request* half is unchanged: the plugin still never prefixes `[visualization]` to the intent. Mirrored the correction in CLAUDE.md's Key Design Decisions.
+- **Prompt**: land as its own documentation-only PR, based directly on `main`, independent of the navigation PRs.

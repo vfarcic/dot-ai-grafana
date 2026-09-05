@@ -21,7 +21,7 @@ This plugin communicates with the dot-ai MCP server via HTTP REST endpoints:
 
 ## Key Design Decisions
 
-- **Text-only responses** — No Mermaid diagrams, cards, or rich visualizations. Displays plain text agent responses.
+- **Markdown rendering, not text-only** — Renders the model's own GFM markdown (headings, lists, tables, code, links) as sanitized HTML; the plugin adds no charts or interactive visualizations of its own. Still never *requests* rich visualizations from dot-ai — never prefixes `[visualization]` to the intent (PRD Design Decision 1). Amends the original text-only decision for **rendering only**; the no-visualization-request rule stands (PRD Decision Log, 2026-09-05).
 - **Read-only** — No action execution. Remediate shows analysis only, without the option to proceed to remediation.
 - **Grafana-native** — Grafana session is required to open the app; Configuration and Test connection are Admin-only; Query/Remediate require org **Editor or Admin**, enforced in the Go handlers (`isEditorOrAbove`) because `plugin.json` cannot gate app resource routes (`includes[].role` is nav visibility; `routes[].reqRole` does not apply to `resources/*`). Upstream calls still use the single shared configured Bearer, so the role check is per-user *authorization*, not per-user upstream identity. Rationale: issue #26, PR #25, PRD Decision Log.
 - **Plugin ID** — `devopstoolkit-dotai-app` (unsigned load requires allow-list).
