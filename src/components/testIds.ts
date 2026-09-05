@@ -14,6 +14,7 @@ export const testIds = {
     intent: 'data-testid dotai-intent',
     submit: 'data-testid dotai-submit',
     response: 'data-testid dotai-response',
+    answerMarkdown: 'data-testid dotai-answer-markdown',
     error: 'data-testid dotai-error',
     loading: 'data-testid dotai-loading',
     tool: 'data-testid dotai-tool',
