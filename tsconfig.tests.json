@@ -1,0 +1,18 @@
+{
+  // Why this file exists:
+  // `.config/tsconfig.json` is scaffolded by `@grafana/create-plugin` and must never be edited
+  // directly — see the extend-configurations guide:
+  // https://grafana.com/developers/plugin-tools/how-to-guides/extend-configurations#extend-the-typescript-config
+  //
+  // Its `include` only covers `../src` and `./types`, so `tests/` (1,072 lines across 9 Playwright
+  // spec/helper files) is never type-checked — not by `npm run typecheck`, not in CI, and not by
+  // Playwright itself (which transpiles specs without type checking). This config extends the root
+  // `tsconfig.json` so the full `@grafana/tsconfig` -> `.config/tsconfig.json` chain of compiler
+  // options applies completely unchanged, and widens only `include`/`rootDir` so `tests/` is part of
+  // a checked program. No compiler option is loosened here.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "."
+  },
+  "include": ["src", "tests", ".config/types"]
+}
