@@ -21,10 +21,24 @@ updates:
       # and would raise the effective Grafana floor above the declared
       # grafanaDependency ">=11.0.0". A major move has to be deliberate and
       # cover all four at once, so Dependabot should not propose it piecemeal.
-      # Minor and patch still flow through the `grafana` group below.
+      #
+      # Minor is ignored for the same reason, learned from #39: these packages
+      # are webpack externals, so the installed version never ships - it only
+      # decides what `tsc` accepts. Pinned at the reference host version, a
+      # green typecheck means "compiles against the Grafana we target"; off it,
+      # tsc silently starts accepting APIs that are undefined on the hosts
+      # grafanaDependency promises. Nothing else in CI catches that: the
+      # levitate compatibilitycheck runs against *latest* Grafana, so it finds
+      # removed APIs and never not-yet-existing ones. #39 also showed a minor
+      # can move backwards - 11.6.16 pins dompurify 3.2.4 exactly, downgrading
+      # it from the 3.4.13 that 11.4.0's "^3.0.0" range resolves.
+      #
+      # Patch still flows through the `grafana` group below, which is where the
+      # upstream fixes actually are - 11.4.x runs to 11.4.8.
       - dependency-name: '@grafana/*'
         update-types:
           - 'version-update:semver-major'
+          - 'version-update:semver-minor'
     groups:
       unit-test:
         patterns:
@@ -41,8 +55,9 @@ updates:
         patterns:
           - '@grafana/*'
         dependency-type: 'production'
+        # Patch only - minor and major are ignored above so the four stay on
+        # the reference host's 11.4.x line.
         update-types:
-          - 'minor'
           - 'patch'
       react:
         patterns:
