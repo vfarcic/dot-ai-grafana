@@ -31,7 +31,7 @@ Whoever is signed in to Grafana uses it under their existing **org role**; there
 
 Ask natural language questions about your cluster. The engine's answer renders as plain text.
 
-On Query, the page reads configured Loki, Prometheus, and Tempo datasources via Grafana's datasource service (no hardcoded UIDs) and packs **Current** + **Map** into the same `{intent}` string. **History** stays on screen only — the last 5 turns in full — and is never sent to the engine. The packed intent is capped at 1000 characters, and your question is reserved *before* the evidence is packed: under pressure the packer drops plugin-written follow-up lines, drops Map, drops the Tempo block, peels Loki, then Prometheus, then Alertmanager lines, and finally caps the Current block itself — never the packed tail that carries the question. On a busy cluster the Loki block can shrink to `…`, so a full log excerpt is not guaranteed. Keep questions short anyway: a long question crowds out evidence, and if the preamble plus the question alone overflow the budget the question is capped as the last resort. One Ask may issue up to 3 dot-ai POSTs.
+On Query, the page reads the configured Loki, Prometheus, Tempo, and Alertmanager datasources via Grafana's datasource service (no hardcoded UIDs; Alertmanager is normally reported missing — see the note under [Configure](#configure)) and packs **Current** + **Map** into the same `{intent}` string. **History** stays on screen only — the last 5 entries, counting each You and each Answer as one — and is never sent to the engine. The packed intent is capped at 1000 characters, and your question is reserved *before* the evidence is packed: under pressure the packer sheds plugin-written follow-up instruction lines until Current can hold its 240-character floor, then drops Map, drops the Tempo block, peels Loki, then Prometheus, then Alertmanager lines, and finally caps the Current block itself rather than blind-capping the packed tail that carries the question. On a busy cluster the Loki block can shrink to `…`, so a full log excerpt is not guaranteed. Keep questions short anyway: a long question crowds out evidence, and if the preamble plus the question alone overflow the budget the question is capped as the last resort. One Ask may issue up to 3 dot-ai POSTs.
 
 **Map** is a short token list of what the Ask resolved: first the datasource each type resolved to — or `(missing)` when none is configured — then the namespaces and pods that came up in the evidence and the conversation. It reads like `Loki loki, Prometheus prometheus, Tempo (missing), Alertmanager (missing), ns/payments, pod/checkout-7d9f`, with `checkout@payments` for a bare "name in namespace" mention. Twelve tokens and 400 characters at most, earliest kept first, so on a stack with all four datasources configured the datasource tokens hold four of the twelve slots. It is shown on the page as plain text and travels inside the intent as follow-up referents, so "why is *that* one restarting?" resolves. It is not built from a Grafana search API.
 
@@ -94,7 +94,7 @@ As Grafana **Admin**: open **Configuration** under **dot-ai** in the left nav, o
 | Send Grafana evidence | On | When on, Asks pack Grafana datasource facts and the page shows a consent info Alert naming them (Loki, Prometheus, Tempo, Alertmanager). Missing/undefined = send. Independent of Show context. |
 | Test connection | — | Admin-only. Probes `POST /api/v1/tools/version` through the plugin backend |
 
-Alertmanager is named in that consent Alert because an Ask also queries a configured Alertmanager datasource cluster-wide. It is resolved like the others, through Grafana's datasource service rather than a hardcoded UID, which does not surface Grafana's own built-in Alertmanager — so in practice Current reports it as missing unless a standalone Alertmanager datasource is configured ([issue #47](https://github.com/vfarcic/dot-ai-grafana/issues/47)). That is why the evidence described above is Loki, Prometheus, and Tempo.
+Alertmanager is named in that consent Alert because an Ask queries a configured Alertmanager datasource alongside the other three, scoped to the pod or namespace the question names and cluster-wide otherwise. It is resolved like the others, through Grafana's datasource service rather than a hardcoded UID, which does not surface Grafana's own built-in Alertmanager — so in practice Current reports it as missing unless a standalone Alertmanager datasource is configured ([issue #47](https://github.com/vfarcic/dot-ai-grafana/issues/47)). That is why the evidence described above is Loki, Prometheus, and Tempo.
 
 **Authentication and authorization.** The plugin uses the signed-in Grafana user and their **org role**, with no separate plugin login, user directory, or per-user credential. **Editor or above** runs Query and Remediate; **Admin** opens Configuration and runs **Test connection**. The **Auth Token** row above is the plugin backend's own credential to the [dot-ai MCP server](https://devopstoolkit.ai/docs/ai-engine) tools REST API — not a user identity.
 
@@ -106,12 +106,12 @@ An Ask resolves in at most three engine hops. The browser never talks to the eng
   Ask ── Remediate: pack Query Current + issue ── 1x POST /remediate
     │
     └── Query
-          Read Loki/Prom/Tempo  →  Current + Map hints
+          Read Loki/Prom/Tempo/Alertmanager  →  Current + Map hints
           classifyFirstHop:
             alerts/logs/metrics/traces/"top issues"/default → grafana
             list/show namespaces|pods|…                     → dot-ai
-          hop 1: POST /query  intent=Stable+Current+Map+question  (≤1000 chars,
-                 question reserved first; evidence sheds, never the question)
+          hop 1: POST /query  intent=Stable+Current+Map+question  (≤1000 chars;
+                 question reserved before evidence, so evidence sheds first)
           hop 2: unscoped → across   OR   answer denies Current → conflict
           hop 3: still hedges → hedge     (cap 3)
           Go strips hop meta, writes ask log, Bearer to dot-ai
