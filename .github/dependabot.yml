@@ -39,6 +39,27 @@ updates:
         update-types:
           - 'version-update:semver-major'
           - 'version-update:semver-minor'
+
+      # eslint majors are held at 9.x because eslint-plugin-react has no release
+      # that supports eslint 10. Its latest (7.37.5) declares
+      # peer eslint "^3 || ^4 || ^5 || ^6 || ^7 || ^8 || ^9.7", and it is not
+      # optional here - @grafana/eslint-config requires it as a peer. Taking
+      # eslint 10 fails `npm ci` outright with ERESOLVE, which is why #38 is red.
+      #
+      # Forcing the peer with an npm `overrides` entry is not a way out: it
+      # installs, then the lint run dies on the first file with
+      #   TypeError: Error while loading rule 'react/display-name':
+      #   contextOrFilename.getFilename is not a function
+      # because eslint 10 removed the legacy context.getFilename() that the
+      # plugin's React-version detection calls. The peer range is accurate
+      # rather than merely conservative, so the block is real and upstream.
+      #
+      # Every other member of the eslint group already declares eslint ^10, so
+      # only the eslint major is ignored - the rest keep flowing through the
+      # group. Revisit when eslint-plugin-react ships eslint 10 support.
+      - dependency-name: 'eslint'
+        update-types:
+          - 'version-update:semver-major'
     groups:
       unit-test:
         patterns:
