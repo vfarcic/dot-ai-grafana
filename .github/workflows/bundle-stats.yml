@@ -53,6 +53,10 @@ jobs:
         run: npm run build -- --profile --json pr-stats.json
 
       # Reading artifacts needs only `actions: read`, which fork runs do get.
+      # head_branch is pinned to main so the baseline cannot come from anywhere
+      # else. Today the upstream action already refuses to upload off main, but
+      # that guard lives in a third-party action we pin by tag - asserting it
+      # here keeps the invariant local and survives a bump.
       - name: Find the latest main branch stats
         if: github.event_name == 'pull_request'
         id: baseline
@@ -61,7 +65,7 @@ jobs:
           ARTIFACT: main-branch-stats
         run: |
           RUN_ID=$(gh api "/repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${ARTIFACT}&per_page=100" \
-            --jq "[.artifacts[] | select(.name == \"${ARTIFACT}\" and .expired == false)] | sort_by(.created_at) | last | .workflow_run.id // empty")
+            --jq "[.artifacts[] | select(.name == \"${ARTIFACT}\" and .expired == false and .workflow_run.head_branch == \"main\")] | sort_by(.created_at) | last | .workflow_run.id // empty")
           echo "run-id=${RUN_ID}" >> "$GITHUB_OUTPUT"
 
       - name: Download the latest main branch stats
