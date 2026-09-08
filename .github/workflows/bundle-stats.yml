@@ -9,9 +9,15 @@ on:
     branches:
       - main
 
+# Deliberately no `pull-requests: write`. GitHub issues a read-only GITHUB_TOKEN
+# to `pull_request` runs whose head is a fork, whatever is declared here, so a PR
+# comment can never work for outside contributors - and every contributor PR in
+# this repo comes from a fork. The comparison is written to the job summary
+# instead, which needs no write scope, so fork and non-fork PRs take the exact
+# same path and this job goes red only when the bundle cannot be built or
+# measured.
 permissions:
   contents: read
-  pull-requests: write
   actions: read
 
 jobs:
@@ -24,4 +30,53 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: grafana/plugin-actions/bundle-size@bundle-size/v1.1.1
+      # On main, the upstream action builds stats.json and uploads it as the
+      # main-branch-stats artifact that the PR steps below compare against. It
+      # never comments on this path, so it keeps working untouched.
+      - name: Build and publish main branch stats
+        if: github.event_name != 'pull_request'
+        uses: grafana/plugin-actions/bundle-size@bundle-size/v1.1.1
+
+      - name: Setup Node.js environment
+        if: github.event_name == 'pull_request'
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        if: github.event_name == 'pull_request'
+        run: npm ci
+
+      - name: Build frontend with bundle stats
+        if: github.event_name == 'pull_request'
+        run: npm run build -- --profile --json pr-stats.json
+
+      # Reading artifacts needs only `actions: read`, which fork runs do get.
+      - name: Find the latest main branch stats
+        if: github.event_name == 'pull_request'
+        id: baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT: main-branch-stats
+        run: |
+          RUN_ID=$(gh api "/repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${ARTIFACT}&per_page=100" \
+            --jq "[.artifacts[] | select(.name == \"${ARTIFACT}\" and .expired == false)] | sort_by(.created_at) | last | .workflow_run.id // empty")
+          echo "run-id=${RUN_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Download the latest main branch stats
+        if: github.event_name == 'pull_request' && steps.baseline.outputs.run-id != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: main-branch-stats
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.baseline.outputs.run-id }}
+
+      - name: Report bundle size against main
+        if: github.event_name == 'pull_request' && steps.baseline.outputs.run-id != ''
+        run: node .github/scripts/bundle-size-summary.mjs stats.json pr-stats.json
+
+      - name: Warn if main stats artifact could not be found
+        if: github.event_name == 'pull_request' && steps.baseline.outputs.run-id == ''
+        run: |
+          echo "::warning title=Main stats artifact could not be found::Push a commit to main, or run this workflow manually with workflow_dispatch, to generate the baseline."
