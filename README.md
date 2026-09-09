@@ -6,7 +6,7 @@ Companion to the [Headlamp plugin](https://github.com/vfarcic/dot-ai-headlamp): 
 
 ## What It Does
 
-- **Query** — Ask questions about your cluster in plain English. The response (`data.result.summary`) is displayed as plain text; once **PR #51** lands it renders as sanitized markdown — headings, lists, tables, code blocks (unhighlighted), links.
+- **Query** — Ask questions about your cluster in plain English. The response (`data.result.summary`) renders as sanitized markdown — headings, lists, tables, code blocks (unhighlighted), links.
 - **Remediate (analysis only)** — Get AI-powered issue analysis. No execute, apply, or mutation UI.
 - **Progressive context** — On Query, the page reads configured Loki, Prometheus, Tempo, and Alertmanager datasources (`getDataSourceSrv`, no hardcoded uids) and packs **Current** + **Map** into the same `{intent}` string. A condensed **Prior:** block (up to `MAX_PRIOR_CHARS` = 240 characters, built from the 2 most recent turns) is also included in the intent inside the unchanged 1000-char budget. Full History remains on screen (last 5 turns). No `sessionId`. One Ask may issue up to 3 dot-ai POSTs (unscoped question or answer vs Current). Remediate is one hop and reuses Query Current. JSONL ask log: `/var/lib/grafana/dotai-ask.log` (no tokens; hop meta stripped before upstream). What Prior actually contains, and what the evidence toggle does and does not cover, is in [Data egress](#data-egress).
 

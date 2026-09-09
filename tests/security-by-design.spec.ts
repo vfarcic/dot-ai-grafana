@@ -8,8 +8,10 @@ import {
   dialProbe,
   isStableEnvelope,
   resourcePath,
+  STUB_BASE_URL,
   stubHealth,
 } from './byDesignHelpers';
+import { testIds } from '../src/components/testIds';
 
 /**
  * Security by design — real HTTP path /api/plugins/<id>/resources/*.
@@ -281,5 +283,122 @@ test.describe('Security by design — remediate allowlist (no execute)', () => {
     // Stub plants STUB_SAW_EXECUTE_KEYS if any execute-ish key survives the allowlist.
     expect(String(env.summary || ''), text).not.toMatch(/STUB_SAW_EXECUTE_KEYS/);
     expect(String(env.summary || '')).toContain('stub-remediate-ok');
+  });
+});
+
+test.describe('Security by design — untrusted markdown answer', () => {
+  test.use({ storageState: adminState });
+
+  /**
+   * The dot-ai answer is attacker-influenceable: it is generated from a prompt packed with
+   * Loki lines, alert annotations and Kubernetes object names, any of which someone with
+   * write access to a monitored cluster can author. The payload is the stub's
+   * INJECTION_ANSWER (tests/harness/dot_ai_stub.py), fetched from the stub by the route
+   * handler below and handed to the page in the plugin's envelope shape.
+   *
+   * Why the route is intercepted rather than proxied: the subject here is the RENDERER, not
+   * the Go proxy. The proxy's own behaviour is asserted by the sibling describes in this
+   * file, which post to /resources/* for real. Intercepting also makes this spec runnable
+   * against a Grafana that has the plugin frontend but no backend binary.
+   *
+   * Measured, not inferred: `probes[token]` proves the payload came out of the stub (the
+   * route handler's dial — not the plugin's), and the request recorder is a browser-side
+   * observation of every request Chromium ATTEMPTED, so a surviving `<img>`/`<iframe>`/
+   * `<link rel=stylesheet>` is counted even though the beacon host never resolves.
+   */
+  test('injected answer renders inert — no embed, no handler, no beacon', async ({ gotoPage, page }) => {
+    const beaconHost = 'beacon.evil.invalid';
+    const probe = dialProbe('render-injection');
+    const before = await stubHealth();
+    expect(before.probes[probe], 'probe token must be unused before the request').toBeUndefined();
+
+    const beaconed: string[] = [];
+    page.on('request', (req) => {
+      if (req.url().includes(beaconHost)) {
+        beaconed.push(`${req.resourceType()} ${req.url()}`);
+      }
+    });
+
+    await page.route(new RegExp(`/api/plugins/[^/]+/resources/query`), async (route) => {
+      const upstream = await fetch(`${STUB_BASE_URL}/api/v1/tools/query`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer e2e-render-probe' },
+        body: JSON.stringify({ intent: `TRIGGER_INJECTION_MARKDOWN ${probe}` }),
+      });
+      const body = (await upstream.json()) as { data?: { result?: { summary?: string } } };
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        // The plugin's stable envelope — same keys the Go proxy returns.
+        body: JSON.stringify({
+          ok: true,
+          status: 200,
+          summary: body.data?.result?.summary ?? '',
+          error: '',
+        }),
+      });
+    });
+
+    await gotoPage('/');
+    await page.getByTestId(testIds.dotai.intent).fill('what is wrong with the api pod');
+    await page.getByTestId(testIds.dotai.submit).click();
+
+    const answer = page.getByTestId(testIds.dotai.answerMarkdown);
+    await expect(answer).toBeVisible({ timeout: 30_000 });
+    // Whole answer arrived — otherwise "no payload rendered" would pass vacuously.
+    await expect(answer).toContainText('INJECTED_ANSWER_START');
+    await expect(answer).toContainText('INJECTED_ANSWER_END');
+
+    const { delta, detail } = await probeDelta(probe);
+    expect(delta, `payload must have come from the stub. ${detail}`).toBeGreaterThan(0);
+
+    const report = await answer.evaluate((root) => {
+      const forbidden = Array.from(
+        root.querySelectorAll('script,iframe,object,embed,img,video,audio,source,svg,style,link,form,input')
+      ).map((el) => el.tagName.toLowerCase());
+      const badAttrs: string[] = [];
+      const badUrls: string[] = [];
+      for (const el of Array.from(root.querySelectorAll('*'))) {
+        for (const attr of Array.from(el.attributes)) {
+          const name = attr.name.toLowerCase();
+          if (name.startsWith('on') || name === 'style' || name === 'src' || name === 'srcset') {
+            badAttrs.push(`${el.tagName.toLowerCase()}[${name}]`);
+          }
+          if (/^\s*(?:javascript|data|vbscript):/i.test(attr.value)) {
+            badUrls.push(`${el.tagName.toLowerCase()}[${name}]=${attr.value.slice(0, 40)}`);
+          }
+        }
+      }
+      const external = root.querySelector<HTMLAnchorElement>('a[href="https://runbooks.example/crashloop"]');
+      return {
+        forbidden,
+        badAttrs,
+        badUrls,
+        pwned: (window as unknown as Record<string, unknown>).__pwned ?? null,
+        headings: root.querySelectorAll('h2').length,
+        listItems: root.querySelectorAll('li').length,
+        externalRel: external?.getAttribute('rel') ?? null,
+        externalTarget: external?.getAttribute('target') ?? null,
+        // Resource timings catch a beacon that fired and then failed DNS.
+        beaconResources: performance
+          .getEntriesByType('resource')
+          .map((e) => e.name)
+          .filter((name) => name.includes('beacon.evil.invalid')),
+      };
+    });
+
+    // The measurement first: every request Chromium attempted to the attacker host.
+    expect(beaconed, 'the browser must make no request to the attacker host').toEqual([]);
+    expect(report.beaconResources, 'no resource timing for the attacker host').toEqual([]);
+    expect(report.forbidden, 'no executable or remote-fetching element may survive').toEqual([]);
+    expect(report.badAttrs, 'no event-handler/style/src attribute may survive').toEqual([]);
+    expect(report.badUrls, 'no executable URL scheme may survive').toEqual([]);
+    expect(report.pwned, 'nothing in the answer may execute').toBeNull();
+
+    // The benign half of the same answer still renders, and its link is safe + external.
+    expect(report.headings).toBeGreaterThan(0);
+    expect(report.listItems).toBeGreaterThan(0);
+    expect(report.externalRel).toBe('noopener noreferrer');
+    expect(report.externalTarget).toBe('_blank');
   });
 });

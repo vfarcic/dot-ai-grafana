@@ -29,7 +29,7 @@ Whoever is signed in to Grafana uses it under their existing **org role**; there
 
 ### Query
 
-Ask natural language questions about your cluster. The engine's answer is displayed as plain text; a later release renders it as sanitized markdown — headings, lists, tables, links, and code blocks (unhighlighted). The plugin never asks the engine for rich visualizations, so no diagrams or charts are generated either way.
+Ask natural language questions about your cluster. The engine's answer renders as sanitized markdown — headings, lists, tables, links, and code blocks (unhighlighted). The plugin never asks the engine for rich visualizations, so no diagrams or charts are generated either way.
 
 On Query, the page reads the configured Loki, Prometheus, Tempo, and Alertmanager datasources via Grafana's datasource service (no hardcoded UIDs) and packs **Current** + **Map** into the same `{intent}` string. **History** stays on screen only — the last 5 entries, counting each You and each Answer as one — and is never sent to the engine. The packed intent is capped at 1000 characters, and your question is reserved *before* the evidence is packed: under pressure the packer sheds plugin-written follow-up instruction lines until Current can hold its 240-character floor, then drops Map, shrinks **Prior** to its latest turn, drops the Tempo block, peels Loki, then Prometheus, then Alertmanager lines, drops Prior entirely, and finally caps the Current block itself rather than blind-capping the packed tail that carries the question. On a busy cluster the Loki block can shrink to `…`, so a full log excerpt is not guaranteed. Keep questions short anyway: a long question crowds out evidence, and if the preamble plus the question alone overflow the budget the question is capped as the last resort. One Ask may issue up to 3 dot-ai POSTs.
 
@@ -116,7 +116,7 @@ An Ask resolves in at most three engine hops. The browser never talks to the eng
           hop 3: still hedges → hedge     (cap 3)
           Go strips hop meta, writes ask log, Bearer to dot-ai
           dot-ai query toolLoop (kubectl/MCP) returns summary
-          Answer renders as plain text (sanitized markdown in a later release)
+          Answer renders as sanitized markdown (unhighlighted code)
 ```
 
 Each POST above travels that same path:
