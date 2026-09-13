@@ -908,9 +908,10 @@ func TestProxyTools(t *testing.T) {
 		// Test tool proxy /query endpoint
 		var resp backend.CallResourceResponse
 		err = app.CallResource(context.Background(), &backend.CallResourceRequest{
-			Path:   "query",
-			Method: http.MethodPost,
-			Body:   []byte(`{"intent":"test transport error"}`),
+			PluginContext: editorPluginContext(),
+			Path:          "query",
+			Method:        http.MethodPost,
+			Body:          []byte(`{"intent":"test transport error"}`),
 		}, callResourceResponseSenderFunc(func(r *backend.CallResourceResponse) error {
 			resp = *r
 			return nil
