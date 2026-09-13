@@ -167,7 +167,7 @@ describe('callDotAITool', () => {
           ok: false,
           status: 502,
           summary: '',
-          error: 'dot-ai unreachable (502): Post "http://dot-ai/api/v1/tools/query": context deadline exceeded',
+          error: 'dot-ai unreachable (502): timeout',
         },
       })
     );

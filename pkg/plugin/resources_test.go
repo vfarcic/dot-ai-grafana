@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -885,6 +886,90 @@ func TestProxyTools(t *testing.T) {
 		}
 		if env.OK || env.Status != http.StatusBadGateway {
 			t.Fatalf("envelope=%+v", env)
+		}
+	})
+
+	t.Run("transport_error_502_does_not_leak_url", func(t *testing.T) {
+		// Point at a closed port / non-routable host to trigger a transport dial error.
+		deadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		deadURL := deadServer.URL
+		deadServer.Close() // Close immediately so client.Do fails with transport error
+
+		inst, err := NewApp(context.Background(), backend.AppInstanceSettings{
+			JSONData:                []byte(`{"apiUrl":"` + deadURL + `"}`),
+			DecryptedSecureJSONData: map[string]string{"apiKey": "tok"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		app := inst.(*App)
+		defer app.Dispose()
+
+		// Test tool proxy /query endpoint
+		var resp backend.CallResourceResponse
+		err = app.CallResource(context.Background(), &backend.CallResourceRequest{
+			Path:   "query",
+			Method: http.MethodPost,
+			Body:   []byte(`{"intent":"test transport error"}`),
+		}, callResourceResponseSenderFunc(func(r *backend.CallResourceResponse) error {
+			resp = *r
+			return nil
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Status != http.StatusBadGateway {
+			t.Fatalf("status=%d want 502 body=%s", resp.Status, string(resp.Body))
+		}
+		var env toolProxyResponse
+		if err := json.Unmarshal(resp.Body, &env); err != nil {
+			t.Fatalf("unmarshal error: %v, body=%s", err, string(resp.Body))
+		}
+		if env.OK {
+			t.Fatalf("expected ok=false, body=%+v", env)
+		}
+		if env.Status != http.StatusBadGateway {
+			t.Fatalf("expected status=502, got %d", env.Status)
+		}
+		// Assert message contains no scheme, host, or port of upstream
+		u, _ := url.Parse(deadURL)
+		if strings.Contains(env.Error, "http://") || strings.Contains(env.Error, "https://") || strings.Contains(env.Error, u.Host) || strings.Contains(env.Error, u.Port()) {
+			t.Fatalf("upstream URL leaked in error message: %q (deadURL=%s)", env.Error, deadURL)
+		}
+		if !strings.HasPrefix(env.Error, "dot-ai unreachable (502)") {
+			t.Fatalf("expected prefix 'dot-ai unreachable (502)', got %q", env.Error)
+		}
+
+		// Test test-connection endpoint
+		var testResp backend.CallResourceResponse
+		payload := []byte(`{"apiUrl":"` + deadURL + `","apiKey":"tok"}`)
+		err = app.CallResource(context.Background(), &backend.CallResourceRequest{
+			PluginContext: adminPluginContext(),
+			Path:          "test-connection",
+			Method:        http.MethodPost,
+			Body:          payload,
+		}, callResourceResponseSenderFunc(func(r *backend.CallResourceResponse) error {
+			testResp = *r
+			return nil
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if testResp.Status != http.StatusBadGateway {
+			t.Fatalf("status=%d want 502 body=%s", testResp.Status, string(testResp.Body))
+		}
+		var connResp testConnectionResponse
+		if err := json.Unmarshal(testResp.Body, &connResp); err != nil {
+			t.Fatalf("unmarshal error: %v, body=%s", err, string(testResp.Body))
+		}
+		if connResp.Status != "error" {
+			t.Fatalf("expected status=error, got %q", connResp.Status)
+		}
+		if strings.Contains(connResp.Message, "http://") || strings.Contains(connResp.Message, "https://") || strings.Contains(connResp.Message, u.Host) || strings.Contains(connResp.Message, u.Port()) {
+			t.Fatalf("upstream URL leaked in test-connection message: %q (deadURL=%s)", connResp.Message, deadURL)
+		}
+		if !strings.HasPrefix(connResp.Message, "dot-ai unreachable") {
+			t.Fatalf("expected prefix 'dot-ai unreachable', got %q", connResp.Message)
 		}
 	})
 }

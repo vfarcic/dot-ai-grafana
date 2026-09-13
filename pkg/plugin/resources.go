@@ -42,6 +42,23 @@ type toolProxyResponse struct {
 	Error   string `json:"error"`
 }
 
+func classifyTransportError(prefix string, err error) string {
+	if err == nil {
+		return prefix
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "context deadline exceeded") || strings.Contains(msg, "timeout") || strings.Contains(msg, "timed out"):
+		return prefix + ": timeout"
+	case strings.Contains(msg, "connection refused"):
+		return prefix + ": connection refused"
+	case strings.Contains(msg, "connection reset"):
+		return prefix + ": connection reset"
+	default:
+		return prefix
+	}
+}
+
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -424,9 +441,10 @@ func (a *App) probeVersion(ctx context.Context, apiURL, apiKey string) (testConn
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
+		log.DefaultLogger.Error("dot-ai version probe transport error", "error", err)
 		return testConnectionResponse{
 			Status:  "error",
-			Message: fmt.Sprintf("dot-ai unreachable: %v", err),
+			Message: classifyTransportError("dot-ai unreachable", err),
 		}, http.StatusBadGateway
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -779,8 +797,8 @@ func (a *App) proxyDotAI(w http.ResponseWriter, req *http.Request, toolPath stri
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		// Do not log secrets; error string is safe dial failure text.
-		finish(http.StatusBadGateway, http.StatusBadGateway, "", fmt.Sprintf("dot-ai unreachable (502): %v", err))
+		log.DefaultLogger.Error("dot-ai tool proxy transport error", "tool", tool, "error", err)
+		finish(http.StatusBadGateway, http.StatusBadGateway, "", classifyTransportError("dot-ai unreachable (502)", err))
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
