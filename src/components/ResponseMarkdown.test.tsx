@@ -221,13 +221,69 @@ describe('ResponseMarkdown — legitimate GFM still renders', () => {
   });
 
   test('task-list state survives in a loose list too', () => {
-    // marked splices the checkbox into the item's token TEXT for loose lists rather than
-    // concatenating rendered HTML, so this path is genuinely different from the tight one.
+    // Tight and loose lists reach the checkbox by different routes inside marked (12 spliced
+    // it into the item's token TEXT, 13+ dispatches a real checkbox token), so a glyph that
+    // works in one is not evidence for the other. Both paths are pinned deliberately.
     const root = renderAnswer('- [x] restart verified\n\n- [ ] rollback verified');
     const text = root.textContent ?? '';
     expect(text).toContain('\u2611');
     expect(text).toContain('\u2610');
     expect(root.querySelectorAll('input')).toHaveLength(0);
+    assertInert(root);
+  });
+
+  /**
+   * Regression pin for the marked 12 -> 18 renderer-API migration.
+   *
+   * marked 12 handed `image`/`link` renderers a `text` argument it had ALREADY escaped, so the
+   * override could return it untouched. marked 13+ hands over the token instead, and
+   * `image.text` is the RAW source. A signature-only port of the old body (`image: ({text}) =>
+   * text`) therefore turns the override from a control into a raw-HTML passthrough: the parser
+   * emits a live `<img onerror=...>`.
+   *
+   * The DOM allowlist would still delete that element, which is exactly why this test does not
+   * assert its absence — `expect(img).toHaveLength(0)` passes under the bug and proves nothing.
+   * It asserts the tag survives as VISIBLE TEXT, which is guarantee (1) in the threat model and
+   * is only true when the escape happened at the parser. Under the bug the element is dropped
+   * and the text is simply gone.
+   */
+  test('raw HTML inside image alt text is escaped at the parser, not merely stripped later', () => {
+    const root = renderAnswer('![<img src=x onerror=alert(1)>](https://example.com/b.png)');
+
+    expect(root.textContent).toContain('<img src=x onerror=alert(1)>');
+    assertInert(root);
+  });
+
+  test('raw HTML inside link text is escaped at the parser, not merely stripped later', () => {
+    const root = renderAnswer('[<img src=x onerror=alert(1)> click](https://example.com/runbook)');
+
+    expect(root.textContent).toContain('<img src=x onerror=alert(1)>');
+    const link = root.querySelector('a');
+    expect(link?.getAttribute('href')).toBe('https://example.com/runbook');
+    assertInert(root);
+  });
+
+  /**
+   * marked escapes alt text with an entity guard, so a character reference in the source
+   * decodes on render. The escape used for the `html` override deliberately does not guard —
+   * there the job is to show source verbatim — so reusing it for alt text would double-escape
+   * and surface `AT&amp;T` to the operator. Pinned because it is invisible to a type check and
+   * to every "is it inert" assertion: the double-escaped form is perfectly safe, just wrong.
+   */
+  test('a character reference in image alt text decodes, matching every other text path', () => {
+    expect(renderAnswer('![AT&amp;T dashboard](https://x/a.png)').textContent).toContain('AT&T dashboard');
+    // The same source outside an image alt, for comparison — these must agree.
+    expect(renderAnswer('AT&amp;T dashboard').textContent).toContain('AT&T dashboard');
+    // A bare ampersand is still just an ampersand.
+    expect(renderAnswer('![AT&T dashboard](https://x/a.png)').textContent).toContain('AT&T dashboard');
+  });
+
+  test('image alt keeps its textual content and never its URL', () => {
+    const root = renderAnswer('![cluster *status* board](https://evil.example/px.png)');
+
+    // textRenderer flattens emphasis to its text, matching what marked puts in `alt=`.
+    expect(root.textContent).toContain('cluster status board');
+    expect(root.innerHTML).not.toContain('evil.example');
     assertInert(root);
   });
 });

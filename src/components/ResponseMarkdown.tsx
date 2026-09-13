@@ -95,6 +95,28 @@ function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;');
 }
 
+/**
+ * Escape for *text content*, as opposed to `escapeHtml` above which escapes for source display.
+ *
+ * The only difference is the `&` guard, and the two callers want opposite things from it. The
+ * `html` override shows raw source verbatim, so a literal `&amp;` in the source should stay
+ * readable as `&amp;` — escape every `&`. Image alt text is prose, and marked's own renderer
+ * escapes it with exactly this guard, so `![AT&amp;T](u)` reads `AT&T`; escaping every `&`
+ * there would surface `AT&amp;T` and make the 12 -> 18 bump visible to the operator.
+ *
+ * This is a fidelity choice, not a weakening: `<` and `>` — the two characters that could open
+ * a tag — are escaped unconditionally either way, and a character reference cannot introduce
+ * markup on its own.
+ */
+function escapeTextContent(value: string): string {
+  return value
+    .replace(/&(?!#?\w+;)/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 /** Marker appended to external links so the destination is visible, not just hoverable. */
 export const EXTERNAL_LINK_MARKER = ' \u2197';
 
@@ -159,9 +181,26 @@ function anchor(href: string, inner: string): string {
  * on that singleton, so overriding it here would change Text-panel rendering app-wide.
  *
  * `marked` removed its `sanitize`/`sanitizer` options in v8, so raw-HTML suppression is a
- * renderer override. Verified against marked 12.0.2: `html` receives the raw source (so it
- * is escaped here), while `image`/`link` receive an already-escaped `text` argument (so it
- * is passed through as-is — escaping it again would show `&amp;lt;`).
+ * renderer override.
+ *
+ * ESCAPING CONTRACT — re-verified against marked 18.0.11, and it is NOT what it was.
+ *
+ * Under marked 12 a renderer took positional arguments and `image`/`link` received a `text`
+ * that marked had already escaped, so passing it through untouched was correct. Under
+ * marked 13+ every renderer takes the token itself, and the token carries the *raw* source:
+ * `image.text` for `![<script>x</script>](u)` is now literally `<script>x</script>`. The
+ * v12 code returned that argument as-is, so carrying it forward verbatim would have turned
+ * this override from the control it is into a raw-HTML passthrough. Hence, per method:
+ *
+ * - `html` — `token.text` is raw source, as before. Escaped here.
+ * - `image` — `token.text` is now RAW. The alt text is derived from the token's own children
+ *   through marked's `textRenderer` (matching what the stock renderer puts in `alt=`) and then
+ *   escaped here with `escapeTextContent`, which mirrors marked's own entity guard so the bump
+ *   changes nothing visible. Never passed through.
+ * - `link` — the inner HTML is no longer handed over; it is parsed from `token.tokens`.
+ *   Nested tokens re-enter this same renderer, so raw HTML inside link text still lands in
+ *   `html` above and is still escaped.
+ * - `checkbox` — `token.checked`, unchanged in meaning.
  */
 const answerMarked = new Marked({
   gfm: true,
@@ -170,18 +209,22 @@ const answerMarked = new Marked({
     // Raw HTML in the answer becomes visible text, never markup. This closes the whole
     // class — script, media, embeds, event handlers, style attributes — at the parser,
     // rather than filtering instances of it afterwards.
-    html(html: string, block?: boolean) {
-      const escaped = escapeHtml(html.trim());
+    html({ text, block }) {
+      const escaped = escapeHtml(text.trim());
       return block ? `<p>${escaped}</p>` : escaped;
     },
     // Markdown image syntax never yields a fetching element. The alt text survives; the
-    // URL is discarded, so there is nothing left to beacon with.
-    image(_href: string, _title: string | null | undefined, text: string) {
-      return text;
+    // URL is discarded, so there is nothing left to beacon with. `textRenderer` flattens the
+    // alt to its textual part (so `![*hi*](u)` reads `hi`, not `*hi*`); `escapeTextContent` is
+    // what keeps a crafted alt from re-entering the output as markup.
+    image({ text, tokens }) {
+      const alt = tokens?.length ? this.parser.parseInline(tokens, this.parser.textRenderer) : text;
+      return escapeTextContent(alt);
     },
-    link(href: string, _title: string | null | undefined, text: string) {
+    link({ href, tokens }) {
+      const inner = this.parser.parseInline(tokens);
       const safe = safeHref(href);
-      return safe ? anchor(safe, text) : text;
+      return safe ? anchor(safe, inner) : inner;
     },
     // GFM task lists. marked's default emits `<input type=checkbox disabled>`, which the
     // allowlist below drops as a fetch-capable element family — and dropping it silently
@@ -189,15 +232,16 @@ const answerMarked = new Marked({
     // loses model output the operator cannot recover, so render the state as a glyph instead
     // of admitting `input`: the allowlist stays tight and there is no element to check.
     //
-    // A glyph is also the only option that behaves the same in tight and loose lists. For a
-    // loose list marked splices this return value into the item's *token text*
-    // (`Parser.parse`, the `item.task` branch), where markup would be re-escaped to visible
-    // text; a text glyph renders identically down both paths.
+    // A glyph is also the only option that behaves the same in tight and loose lists. marked
+    // 13+ made the checkbox a real token dispatched through this renderer down both paths
+    // (marked 12 spliced the value into the *loose* item's token text, where markup would have
+    // been re-escaped to visible text). A text glyph was path-independent under the old
+    // splicing and stays so under the new dispatch.
     //
     // Trade-off, recorded because it is a real one: a native disabled checkbox announces
     // better to a screen reader than U+2611/U+2610, which read as their character names.
     // Preserving the distinction visibly beats losing it, so this is the lesser cost.
-    checkbox(checked: boolean) {
+    checkbox({ checked }) {
       return checked ? '\u2611' : '\u2610';
     },
   },
