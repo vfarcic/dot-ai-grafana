@@ -15,7 +15,9 @@ import { readFileSync, appendFileSync } from 'node:fs';
 
 // Percentage growth of the entrypoint total above which the report is also
 // raised as a workflow warning annotation. Mirrors the upstream action default.
-const THRESHOLD = Number(process.env.BUNDLE_SIZE_THRESHOLD ?? 5);
+const rawThreshold = process.env.BUNDLE_SIZE_THRESHOLD?.trim();
+const parsedThreshold = rawThreshold ? Number(rawThreshold) : NaN;
+const THRESHOLD = Number.isFinite(parsedThreshold) ? parsedThreshold : 5;
 
 // Longest asset/entry tables to render, so a chunk-splitting change cannot bury
 // the summary under hundreds of rows.
@@ -80,6 +82,11 @@ function diffRows(oldSizes, newSizes) {
   return rows.sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff) || a.name.localeCompare(b.name));
 }
 
+// Note: sums entrypoints[*].assetsSize across all entrypoints. If an asset is
+// shared by two or more entrypoints, it is counted multiple times in this total.
+// This plugin currently has a single entrypoint ("module"), so there is no
+// double-counting in practice. This matches grafana/plugin-actions/bundle-size
+// compareStats.js deliberately so totals remain consistent with historical runs.
 function total(sizes) {
   return [...sizes.values()].reduce((sum, size) => sum + size, 0);
 }

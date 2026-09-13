@@ -64,10 +64,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ARTIFACT: main-branch-stats
         run: |
+          API_ERR=0
           RUN_ID=$(gh api "/repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${ARTIFACT}&per_page=100" \
-            --jq "[.artifacts[] | select(.name == \"${ARTIFACT}\" and .expired == false and .workflow_run.head_branch == \"main\")] | sort_by(.created_at) | last | .workflow_run.id // empty")
-          echo "run-id=${RUN_ID}" >> "$GITHUB_OUTPUT"
-
+            --jq "[.artifacts[] | select(.name == \"${ARTIFACT}\" and .expired == false and .workflow_run.head_branch == \"main\")] | sort_by(.created_at) | last | .workflow_run.id // empty" 2>&1) || API_ERR=$?
+          if [ "$API_ERR" -ne 0 ]; then
+            echo "run-id=" >> "$GITHUB_OUTPUT"
+            echo "lookup-error=${RUN_ID}" >> "$GITHUB_OUTPUT"
+          else
+            echo "run-id=${RUN_ID}" >> "$GITHUB_OUTPUT"
+            echo "lookup-error=" >> "$GITHUB_OUTPUT"
+          fi
       - name: Download the latest main branch stats
         if: github.event_name == 'pull_request' && steps.baseline.outputs.run-id != ''
         uses: actions/download-artifact@v8
@@ -81,6 +87,13 @@ jobs:
         run: node .github/scripts/bundle-size-summary.mjs stats.json pr-stats.json
 
       - name: Warn if main stats artifact could not be found
-        if: github.event_name == 'pull_request' && steps.baseline.outputs.run-id == ''
+        if: github.event_name == 'pull_request' && steps.baseline.outputs.run-id == '' && steps.baseline.outputs.lookup-error == ''
         run: |
-          echo "::warning title=Main stats artifact could not be found::Push a commit to main, or run this workflow manually with workflow_dispatch, to generate the baseline."
+          echo "::warning title=Main stats artifact could not be found::No baseline artifact found on main. Push a commit to main, or run this workflow manually with workflow_dispatch, to generate the baseline."
+
+      - name: Warn if main stats artifact lookup failed
+        if: github.event_name == 'pull_request' && steps.baseline.outputs.lookup-error != ''
+        env:
+          LOOKUP_ERROR: ${{ steps.baseline.outputs.lookup-error }}
+        run: |
+          echo "::warning title=Main stats artifact lookup failed::GitHub API lookup failed: ${LOOKUP_ERROR}"
