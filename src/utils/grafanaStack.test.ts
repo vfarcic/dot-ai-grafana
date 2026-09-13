@@ -668,6 +668,23 @@ describe('dashboardUidsFromAlertFrames', () => {
     expect(uids).toEqual(['ok-uid-1']);
   });
 
+  test('enforces UID length bounds: rejects 41-char UID and keeps 40-char valid UID', () => {
+    const uid40 = 'a'.repeat(40);
+    const uid41 = 'a'.repeat(41);
+    const uids = dashboardUidsFromAlertFrames([
+      {
+        fields: [
+          {
+            name: 'dashboardUid',
+            type: 'string',
+            values: [uid41, uid40],
+          },
+        ],
+      } as never,
+    ]);
+    expect(uids).toEqual([uid40]);
+  });
+
   test('caps extraction at DASHBOARD_UID_CAP even when hundreds of distinct uids are present', () => {
     const many = Array.from({ length: 200 }, (_, i) => `dash-uid-${String(i).padStart(3, '0')}`);
     const uids = dashboardUidsFromAlertFrames([
