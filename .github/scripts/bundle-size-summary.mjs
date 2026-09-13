@@ -12,12 +12,29 @@
 // growth is reported, never a failure, matching the upstream action's behaviour.
 
 import { readFileSync, appendFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 
 // Percentage growth of the entrypoint total above which the report is also
-// raised as a workflow warning annotation. Mirrors the upstream action default.
-const rawThreshold = process.env.BUNDLE_SIZE_THRESHOLD?.trim();
-const parsedThreshold = rawThreshold ? Number(rawThreshold) : NaN;
-const THRESHOLD = Number.isFinite(parsedThreshold) ? parsedThreshold : 5;
+// raised as a workflow warning annotation. Mirrors the upstream action default (5).
+// Empty/unset -> 5. Optional trailing %. Set-but-invalid fails closed (no silent 5).
+export function parseThreshold(raw, fallback = 5) {
+  if (raw == null) {
+    return fallback;
+  }
+  const trimmed = String(raw).trim();
+  if (trimmed === '') {
+    return fallback;
+  }
+  const numeric = trimmed.endsWith('%') ? trimmed.slice(0, -1).trim() : trimmed;
+  if (!/^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/.test(numeric)) {
+    throw new Error(`BUNDLE_SIZE_THRESHOLD is not a number: ${JSON.stringify(raw)}`);
+  }
+  const value = Number(numeric);
+  if (!Number.isFinite(value)) {
+    throw new Error(`BUNDLE_SIZE_THRESHOLD is not a number: ${JSON.stringify(raw)}`);
+  }
+  return value;
+}
 
 // Longest asset/entry tables to render, so a chunk-splitting change cannot bury
 // the summary under hundreds of rows.
@@ -105,6 +122,15 @@ function table(rows) {
   return lines.join('\n');
 }
 
+function isMain() {
+  try {
+    return import.meta.url === pathToFileURL(process.argv[1]).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isMain()) {
 const [baseFile, prFile] = process.argv.slice(2);
 if (!baseFile || !prFile) {
   console.error('Usage: node .github/scripts/bundle-size-summary.mjs <base-stats.json> <pr-stats.json>');
@@ -112,6 +138,7 @@ if (!baseFile || !prFile) {
 }
 
 try {
+  const THRESHOLD = parseThreshold(process.env.BUNDLE_SIZE_THRESHOLD);
   const baseStats = readStats('main branch', baseFile);
   const prStats = readStats('pull request', prFile);
 
@@ -162,4 +189,5 @@ try {
   // A stack trace here would only point at this script; the message is the signal.
   console.log(`::error title=Bundle size comparison failed::${error.message}`);
   process.exit(1);
+}
 }

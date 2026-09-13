@@ -67,12 +67,28 @@ jobs:
           API_ERR=0
           RUN_ID=$(gh api "/repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${ARTIFACT}&per_page=100" \
             --jq "[.artifacts[] | select(.name == \"${ARTIFACT}\" and .expired == false and .workflow_run.head_branch == \"main\")] | sort_by(.created_at) | last | .workflow_run.id // empty" 2>&1) || API_ERR=$?
+          # run-id must be digits only so a gh warning on stdout cannot become the baseline.
+          # lookup-error is a heredoc so newlines in gh stderr cannot break GITHUB_OUTPUT.
           if [ "$API_ERR" -ne 0 ]; then
             echo "run-id=" >> "$GITHUB_OUTPUT"
-            echo "lookup-error=${RUN_ID}" >> "$GITHUB_OUTPUT"
+            {
+              echo "lookup-error<<ERR"
+              printf '%s\n' "$RUN_ID"
+              echo "ERR"
+            } >> "$GITHUB_OUTPUT"
           else
-            echo "run-id=${RUN_ID}" >> "$GITHUB_OUTPUT"
-            echo "lookup-error=" >> "$GITHUB_OUTPUT"
+            RUN_ID=$(printf '%s' "$RUN_ID" | tr -d '\r' | tr -d '\n')
+            if [ -n "$RUN_ID" ] && ! printf '%s' "$RUN_ID" | grep -Eq '^[0-9]+$'; then
+              echo "run-id=" >> "$GITHUB_OUTPUT"
+              {
+                echo "lookup-error<<ERR"
+                printf '%s\n' "baseline run-id is not numeric: ${RUN_ID}"
+                echo "ERR"
+              } >> "$GITHUB_OUTPUT"
+            else
+              echo "run-id=${RUN_ID}" >> "$GITHUB_OUTPUT"
+              echo "lookup-error=" >> "$GITHUB_OUTPUT"
+            fi
           fi
       - name: Download the latest main branch stats
         if: github.event_name == 'pull_request' && steps.baseline.outputs.run-id != ''
