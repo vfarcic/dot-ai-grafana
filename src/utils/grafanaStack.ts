@@ -30,6 +30,13 @@ export const WINDOW_MS = 15 * 60 * 1000;
 export const PROM_SERIES_CAP = 8;
 export const TEMPO_TRACE_CAP = 5;
 export const ALERT_CAP = 8;
+/**
+ * Cap on dashboard uids extracted from firing alerts. Matches buildDrilldownLinks'
+ * own 5-link limit, so nothing extracted here ever goes unused downstream, and it
+ * bounds the growth of the Current/Map text these uids feed before the packer ever
+ * sees them — see dashboardUidsFromAlertFrames.
+ */
+export const DASHBOARD_UID_CAP = 5;
 
 export type PodNamespaceTarget = {
   pod?: string;
@@ -352,6 +359,93 @@ export function textLinesFromFrames(frames: DataFrame[], cap: number): string[] 
   }
   return lines.slice(0, cap);
 }
+const DASHBOARD_UID_KEYS = ['dashboardUID', 'dashboardUid', '__dashboardUid__', 'dashboard_uid'];
+
+function addDashboardUid(raw: unknown, seen: Record<string, true>, uids: string[]) {
+  if (uids.length >= DASHBOARD_UID_CAP) {
+    return;
+  }
+  const s = String(raw ?? '').trim();
+  if (!s || seen[s] || !/^[A-Za-z0-9_-]{5,40}$/.test(s)) {
+    return;
+  }
+  seen[s] = true;
+  uids.push(s);
+}
+
+/**
+ * v1: dashboard UIDs Grafana already attached to firing alerts. Never GET /api/search.
+ * Capped at DASHBOARD_UID_CAP: a cluster with many firing alerts can carry a distinct
+ * dashboardUID label per alert, and both dashboardHintFromUids (mapHint) and
+ * formatCurrent render every uid this returns with no cap of their own — an unbounded
+ * list here grows the Current block past its packer budget and starves the packer
+ * into shedding real Loki/Prometheus/Alertmanager evidence lines instead.
+ */
+export function dashboardUidsFromAlertFrames(frames: DataFrame[]): string[] {
+  const uids: string[] = [];
+  const seen: Record<string, true> = {};
+  for (const frame of frames) {
+    if (uids.length >= DASHBOARD_UID_CAP) {
+      break;
+    }
+    for (const field of frame.fields ?? []) {
+      if (uids.length >= DASHBOARD_UID_CAP) {
+        break;
+      }
+      if (DASHBOARD_UID_KEYS.includes(field.name)) {
+        const len = fieldLength(field.values);
+        for (let i = 0; i < len && uids.length < DASHBOARD_UID_CAP; i++) {
+          addDashboardUid(fieldGet(field.values, i), seen, uids);
+        }
+      }
+      const labels = (field as { labels?: Record<string, string> }).labels ?? {};
+      for (const key of DASHBOARD_UID_KEYS) {
+        if (labels[key]) {
+          addDashboardUid(labels[key], seen, uids);
+        }
+      }
+    }
+  }
+  return uids;
+}
+
+/**
+ * Map hint for the dashboards Grafana attached to firing alerts. Three cases, because
+ * both the Current (700) and Map (400) budgets are fixed and every char spent here is
+ * a char of real evidence the packer sheds:
+ *
+ * - links exist                 → name them; the model can cite them.
+ * - alerts firing, no links     → say so; the explicit negative is the cheap defence
+ *                                 against inventing a dashboard link for an alert.
+ * - no alerts at all            → '' — there is nothing a dashboard could be linked to,
+ *                                 so the sentence would cost budget to say nothing.
+ */
+export function dashboardHintFromUids(uids: string[], alertsFiring = false): string {
+  if (uids.length > 0) {
+    return 'dashboards: ' + uids.map((u) => '/d/' + u).join(' ');
+  }
+  return alertsFiring ? 'dashboards: none linked on firing alerts' : '';
+}
+
+/**
+ * dashboardUidsFromAlertFrames only understands DataFrame shapes — this is the boundary
+ * adapter from the real JSON alert payload into that shape, so its field/label scanning,
+ * the UID regex validation, and DASHBOARD_UID_CAP stay untouched and still apply.
+ */
+export function frameFromAlertmanagerAlert(alert: AlertmanagerAlert): DataFrame {
+  const fields: DataFrame['fields'] = [];
+  for (const key of DASHBOARD_UID_KEYS) {
+    const val = alert.annotations?.[key] || alert.labels?.[key];
+    if (val) {
+      fields.push({ name: key, type: 'string' as never, values: [val], config: {} });
+    }
+  }
+  return {
+    fields,
+    length: fields.length > 0 ? 1 : 0,
+  };
+}
+
 
 export function linesFromLokiFrames(frames: DataFrame[]): string[] {
   return textLinesFromFrames(frames, LOG_LINE_CAP);
@@ -526,6 +620,7 @@ function formatCurrent(args: {
   promLines: string[];
   tempoLines: string[];
   alertLines: string[];
+  dashboardUids: string[];
   lokiNote?: string;
   promNote?: string;
   tempoNote?: string;
@@ -545,6 +640,26 @@ function formatCurrent(args: {
   parts.push('');
   parts.push(`Alertmanager${scope}:`);
   parts.push(args.alertLines.length > 0 ? args.alertLines.join('\n') : args.alertNote ?? 'no alerts');
+  // Dashboards are alert-derived, not a queried datasource, so unlike the four blocks
+  // above they have no "checked, found nothing" state of their own. Emitted in two of
+  // three cases: the links when Grafana attached any, and an explicit negative when
+  // alerts are firing but carry none — that negative is the cheap defence against the
+  // model inventing a link for an alert it can see. On a cluster with no firing alerts
+  // the block is omitted: there it cost 65 chars of the fixed 700-char MAX_CURRENT_CHARS
+  // budget to announce nothing, and the packer paid for it by shedding the last Loki
+  // line that still fitted. dashboardUids is already capped at DASHBOARD_UID_CAP by
+  // dashboardUidsFromAlertFrames, so this block's own growth is bounded too.
+  const dashboardHint =
+    args.dashboardUids.length > 0
+      ? args.dashboardUids.map((u) => '/d/' + u).join('\n')
+      : args.alertLines.length > 0
+        ? '(none linked on firing alerts)'
+        : '';
+  if (dashboardHint) {
+    parts.push('');
+    parts.push('Dashboards (from firing alerts):');
+    parts.push(dashboardHint);
+  }
 
   return parts.join('\n');
 }
@@ -591,7 +706,6 @@ export async function fetchStackContext(question: string): Promise<StackContextR
   if (target.pod) {
     mapParts.push(`pod/${target.pod}`);
   }
-  const mapHint = mapParts.filter(Boolean).join(', ');
 
   const queryOne = async (
     ds: { ds?: { query: (req: DataQueryRequest) => unknown } } | undefined,
@@ -613,25 +727,29 @@ export async function fetchStackContext(question: string): Promise<StackContextR
     }
   };
 
-  const queryAlertmanager = async (): Promise<{ lines: string[]; note?: string }> => {
+  const queryAlertmanager = async (): Promise<{ lines: string[]; note?: string; frames: DataFrame[] }> => {
     if (!am?.settings) {
-      return { lines: [], note: 'Alertmanager datasource missing' };
+      return { lines: [], note: 'Alertmanager datasource missing', frames: [] };
     }
     try {
       const raw = await fetchAlertmanagerAlerts(am.settings, target);
       const lines = linesFromAlertmanagerAlerts(raw, ALERT_CAP);
+      const alerts = Array.isArray(raw) ? (raw as AlertmanagerAlert[]) : [];
+      const frames = alerts.map(frameFromAlertmanagerAlert);
       if (lines.length === 0) {
         return {
           lines,
+          frames,
           // /api/v2/alerts is a current-state snapshot, not a time window like the
           // Loki/Prometheus/Tempo notes, so this must not claim "in the last 15m".
           note: scoped ? 'no alerts firing for this pod/namespace' : 'no alerts firing',
         };
       }
-      return { lines };
+      return { lines, frames };
     } catch (e) {
       return {
         lines: [],
+        frames: [],
         note: `Alertmanager alerts unavailable (${e instanceof Error ? e.message : 'request failed'})`,
       };
     }
@@ -693,6 +811,11 @@ export async function fetchStackContext(question: string): Promise<StackContextR
   tempoNote = tempoRes.note;
   alertLines = amRes.lines;
   alertNote = amRes.note;
+  const dashboardUids = dashboardUidsFromAlertFrames(amRes.frames);
+
+  const mapHint = [...mapParts, dashboardHintFromUids(dashboardUids, alertLines.length > 0)]
+    .filter(Boolean)
+    .join(', ');
 
   const tempoSearch = target.pod || target.namespace || question.slice(0, 80);
   const drilldowns = buildDrilldownLinks({
@@ -703,11 +826,7 @@ export async function fetchStackContext(question: string): Promise<StackContextR
     promql,
     tempoSearch,
     traceIds: tempoLines.map((line) => line.replace(/^trace\s+/i, '').trim()).filter(Boolean),
-    // Firing alerts carry dashboard uids in their annotations, but the alert reader
-    // above keeps only `summary`/`description` (#47 landed the evidence, not the uid),
-    // so there is still nothing to pass. Left explicit rather than made optional so
-    // the wiring surfaces the moment a source exists — see #66 for the follow-up.
-    dashboardUids: [],
+    dashboardUids,
   });
 
   const currentEmpty = isStackCurrentEmpty({ logLines, promLines, tempoLines, alertLines });
@@ -725,6 +844,7 @@ export async function fetchStackContext(question: string): Promise<StackContextR
       promLines,
       tempoLines,
       alertLines,
+      dashboardUids,
       lokiNote,
       promNote,
       tempoNote,

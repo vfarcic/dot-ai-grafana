@@ -3,6 +3,9 @@ import { getBackendSrv, getDataSourceSrv } from '@grafana/runtime';
 import {
   buildLogQL,
   CLUSTER_LOGQL,
+  DASHBOARD_UID_CAP,
+  dashboardHintFromUids,
+  dashboardUidsFromAlertFrames,
   fetchStackContext,
   getDataSourceByType,
   linesFromAlertmanagerAlerts,
@@ -338,6 +341,69 @@ describe('fetchStackContext', () => {
     expect(result.current).toContain('summary=pod is crash looping');
     expect(result.currentEmpty).toBe(false);
   });
+  test('surfaces dashboard links from firing alerts in Current and Map hint', async () => {
+    mockGet.mockImplementation(async () => ({ query: () => of({ data: [] }) }));
+    mockBackendGet.mockImplementation(async (url: string) => {
+      if (url === `${AM_URL}/api/v2/alerts`) {
+        return [
+          alertmanagerAlert({
+            labels: { alertname: 'KubePodCrashLooping', severity: 'critical' },
+            annotations: { dashboardUID: 'abc12def' },
+          }),
+        ];
+      }
+      return [];
+    });
+
+    const result = await fetchStackContext('how healthy is the cluster?');
+
+    expect(result.current).toContain('Dashboards (from firing alerts):');
+    expect(result.current).toContain('/d/abc12def');
+    expect(result.mapHint).toContain('dashboards: /d/abc12def');
+    expect(result.drilldowns.some((d) => d.href.includes('/d/abc12def'))).toBe(true);
+  });
+
+  test('never calls GET /api/search to resolve dashboard links from firing alerts', async () => {
+    mockGet.mockImplementation(async () => ({ query: () => of({ data: [] }) }));
+    mockBackendGet.mockImplementation(async (url: string) => {
+      if (url === `${AM_URL}/api/v2/alerts`) {
+        return [
+          alertmanagerAlert({
+            labels: { alertname: 'KubePodCrashLooping' },
+            annotations: { dashboardUID: 'abc12def' },
+          }),
+        ];
+      }
+      return [];
+    });
+
+    const result = await fetchStackContext('how healthy is the cluster?');
+
+    expect(result.current).toContain('/d/abc12def');
+    expect(JSON.stringify(mockBackendGet.mock.calls)).not.toMatch(/api\/search/);
+    expect(JSON.stringify(mockGet.mock.calls)).not.toMatch(/api\/search/);
+  });
+
+  test('hundreds of firing-alert dashboard uids stay bounded at DASHBOARD_UID_CAP', async () => {
+    const manyUids = Array.from({ length: 200 }, (_, i) => `dash-uid-${String(i).padStart(3, '0')}`);
+    mockGet.mockImplementation(async () => ({ query: () => of({ data: [] }) }));
+    mockBackendGet.mockImplementation(async (url: string) => {
+      if (url === `${AM_URL}/api/v2/alerts`) {
+        return manyUids.map((uid, i) =>
+          alertmanagerAlert({
+            labels: { alertname: `Alert${i}` },
+            annotations: { dashboardUID: uid },
+          })
+        );
+      }
+      return [];
+    });
+
+    const result = await fetchStackContext('top issues in the cluster');
+
+    expect(result.current.match(/\/d\//g) ?? []).toHaveLength(DASHBOARD_UID_CAP);
+    expect(result.mapHint.match(/\/d\//g) ?? []).toHaveLength(DASHBOARD_UID_CAP);
+  });
 
   test('reports a failed Alertmanager proxy call distinctly from "no alerts", never silently empty', async () => {
     mockGet.mockImplementation(async () => ({ query: () => of({ data: [] }) }));
@@ -556,5 +622,67 @@ describe('getDataSourceByType real getList filtering (issue #47)', () => {
     const picked = await getDataSourceByType('alertmanager');
 
     expect(picked?.settings?.uid).toBe('am-1');
+  });
+});
+
+describe('dashboardUidsFromAlertFrames', () => {
+  test('reads dashboardUid field and labels; ignores junk', () => {
+    const uids = dashboardUidsFromAlertFrames([
+      {
+        fields: [
+          { name: 'alertname', type: 'string', values: ['KubePodCrashLooping'] },
+          { name: 'dashboardUid', type: 'string', values: ['abc12def'] },
+        ],
+      } as never,
+      {
+        fields: [
+          {
+            name: 'alertname',
+            type: 'string',
+            values: ['Other'],
+            labels: { __dashboardUid__: 'panel-uid-1' },
+          },
+        ],
+      } as never,
+      {
+        fields: [{ name: 'dashboardUid', type: 'string', values: ['no'] }],
+      } as never,
+    ]);
+    expect(uids).toEqual(['abc12def', 'panel-uid-1']);
+    expect(dashboardHintFromUids([])).toBe('');
+    expect(dashboardHintFromUids(uids)).toContain('/d/abc12def');
+  });
+
+  test('rejects malicious/malformed strings — no javascript:/traversal survives the shape check', () => {
+    const uids = dashboardUidsFromAlertFrames([
+      {
+        fields: [
+          {
+            name: 'dashboardUid',
+            type: 'string',
+            values: ['javascript:alert(1)', '../../etc/passwd', 'ok-uid-1'],
+          },
+        ],
+      } as never,
+    ]);
+    expect(uids).toEqual(['ok-uid-1']);
+  });
+
+  test('caps extraction at DASHBOARD_UID_CAP even when hundreds of distinct uids are present', () => {
+    const many = Array.from({ length: 200 }, (_, i) => `dash-uid-${String(i).padStart(3, '0')}`);
+    const uids = dashboardUidsFromAlertFrames([
+      { fields: [{ name: 'dashboardUid', type: 'string', values: many }] } as never,
+    ]);
+    expect(uids).toHaveLength(DASHBOARD_UID_CAP);
+    expect(uids).toEqual(many.slice(0, DASHBOARD_UID_CAP));
+  });
+
+  test('dashboardHintFromUids handles three budget-aware cases', () => {
+    // 1. links exist -> named links
+    expect(dashboardHintFromUids(['dash-1', 'dash-2'])).toBe('dashboards: /d/dash-1 /d/dash-2');
+    // 2. alerts firing but no links -> anti-hallucination notice
+    expect(dashboardHintFromUids([], true)).toBe('dashboards: none linked on firing alerts');
+    // 3. no alerts firing -> empty string to preserve budget
+    expect(dashboardHintFromUids([], false)).toBe('');
   });
 });
