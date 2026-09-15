@@ -26,7 +26,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -35,11 +35,11 @@ jobs:
       # never comments on this path, so it keeps working untouched.
       - name: Build and publish main branch stats
         if: github.event_name != 'pull_request'
-        uses: grafana/plugin-actions/bundle-size@bundle-size/v1.1.1
+        uses: grafana/plugin-actions/bundle-size@31f6f292a4ccc6530594b8939af571898b09cda8 # bundle-size/v1.1.1
 
       - name: Setup Node.js environment
         if: github.event_name == 'pull_request'
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
           cache: 'npm'
@@ -70,7 +70,7 @@ jobs:
 
       - name: Download the latest main branch stats
         if: github.event_name == 'pull_request' && steps.baseline.outputs.run-id != ''
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: main-branch-stats
           github-token: ${{ github.token }}
