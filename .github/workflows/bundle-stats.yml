@@ -100,8 +100,9 @@ jobs:
 
       - name: Report bundle size against main
         if: github.event_name == 'pull_request' && steps.baseline.outputs.run-id != ''
+        env:
+          BUNDLE_SIZE_THRESHOLD: '5'
         run: node .github/scripts/bundle-size-summary.mjs stats.json pr-stats.json
-
       - name: Warn if main stats artifact could not be found
         if: github.event_name == 'pull_request' && steps.baseline.outputs.run-id == '' && steps.baseline.outputs.lookup-error == ''
         run: |
