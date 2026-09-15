@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,10 +13,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
+	sdkgolog "github.com/grafana/grafana-plugin-sdk-go/backend/log"
 )
 
 func TestCallResource(t *testing.T) {
@@ -93,7 +97,6 @@ func viewerPluginContext() backend.PluginContext {
 		User: &backend.User{Login: "viewer", Role: "Viewer"},
 	}
 }
-
 
 func TestMethodNotAllowed(t *testing.T) {
 	inst, err := NewApp(context.Background(), backend.AppInstanceSettings{})
@@ -671,9 +674,7 @@ func TestTestConnection(t *testing.T) {
 		}
 	})
 
-
 }
-
 
 func TestProxyTools(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -696,7 +697,7 @@ func TestProxyTools(t *testing.T) {
 	defer upstream.Close()
 
 	inst, err := NewApp(context.Background(), backend.AppInstanceSettings{
-		JSONData: []byte(`{"apiUrl":"` + upstream.URL + `"}`),
+		JSONData:                []byte(`{"apiUrl":"` + upstream.URL + `"}`),
 		DecryptedSecureJSONData: map[string]string{"apiKey": "tok"},
 	})
 	if err != nil {
@@ -973,6 +974,153 @@ func TestProxyTools(t *testing.T) {
 			t.Fatalf("expected prefix 'dot-ai unreachable', got %q", connResp.Message)
 		}
 	})
+}
+
+// captureLogger records Error() calls so tests can prove the fix relocates
+// (not deletes) transport detail to the server-side log. It implements the SDK
+// log.Logger interface.
+type captureLogger struct {
+	mu     sync.Mutex
+	errors []string
+}
+
+func (c *captureLogger) Debug(string, ...interface{}) {}
+func (c *captureLogger) Info(string, ...interface{})  {}
+func (c *captureLogger) Warn(string, ...interface{})  {}
+func (c *captureLogger) Error(msg string, args ...interface{}) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.errors = append(c.errors, msg+" "+fmt.Sprint(args...))
+}
+func (c *captureLogger) With(...interface{}) sdkgolog.Logger         { return c }
+func (c *captureLogger) Level() sdkgolog.Level                       { return sdkgolog.Debug }
+func (c *captureLogger) FromContext(context.Context) sdkgolog.Logger { return c }
+
+func (c *captureLogger) joined() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return strings.Join(c.errors, "\n")
+}
+
+// TestTransportErrorDoesNotLeakUpstreamURL asserts the DOTAI-SEC-001 contract
+// that NO transport-level failure surfaces the configured upstream scheme,
+// host, port, or path to the browser, at EITHER call site (tool proxy and
+// probeVersion), while the full detail is STILL logged server-side.
+//
+// Each error class is injected through a roundTripFunc transport; http.Client
+// wraps every RoundTrip error in a *url.Error that embeds the request URL, so
+// this exercises the exact leak vector the fix closes.
+func TestTransportErrorDoesNotLeakUpstreamURL(t *testing.T) {
+	// Distinctive scheme/host/port/path so any leak is unambiguous.
+	const apiBase = "http://127.0.0.1:62435/base/path"
+
+	leakTokens := []string{
+		"http://", "https://", // scheme
+		"127.0.0.1",     // host
+		"62435",         // port
+		"/base/path",    // configured path prefix
+		"/api/v1/tools", // version/query/remediate path segment
+	}
+
+	cases := []struct {
+		name     string
+		err      error
+		wantTail string // expected classified suffix ("": bare prefix)
+	}{
+		{name: "dial_refused", err: errors.New("dial tcp 127.0.0.1:62435: connect: connection refused"), wantTail: ": connection refused"},
+		{name: "connection_reset", err: errors.New("read tcp 127.0.0.1:62435: read: connection reset by peer"), wantTail: ": connection reset"},
+		{name: "eof", err: io.EOF, wantTail: ""},
+		{name: "timeout", err: context.DeadlineExceeded, wantTail: ": timeout"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			inst, err := NewApp(context.Background(), backend.AppInstanceSettings{
+				JSONData:                []byte(`{"apiUrl":"` + apiBase + `"}`),
+				DecryptedSecureJSONData: map[string]string{"apiKey": "tok"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			app := inst.(*App)
+			defer app.Dispose()
+
+			// Inject a transport that fails with this class. Both clients must
+			// point at it so tool proxy and probeVersion exercise the same error.
+			failClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return nil, tc.err
+			})}
+			app.httpClient = failClient
+			app.toolHTTPClient = failClient
+
+			// Capture the server-side log to prove the detail is retained there.
+			capture := &captureLogger{}
+			prev := sdkgolog.DefaultLogger
+			sdkgolog.DefaultLogger = capture
+			defer func() { sdkgolog.DefaultLogger = prev }()
+
+			jsonBody := func(reqPath string, pctx backend.PluginContext, body string) backend.CallResourceResponse {
+				t.Helper()
+				var resp backend.CallResourceResponse
+				err := app.CallResource(context.Background(), &backend.CallResourceRequest{
+					PluginContext: pctx,
+					Path:          reqPath,
+					Method:        http.MethodPost,
+					Body:          []byte(body),
+				}, callResourceResponseSenderFunc(func(r *backend.CallResourceResponse) error {
+					resp = *r
+					return nil
+				}))
+				if err != nil {
+					t.Fatalf("CallResource(%s): %v", reqPath, err)
+				}
+				return resp
+			}
+
+			assertNoLeak := func(site, got string) {
+				t.Helper()
+				for _, tok := range leakTokens {
+					if strings.Contains(got, tok) {
+						t.Fatalf("%s leaked upstream token %q in %q", site, tok, got)
+					}
+				}
+			}
+
+			// --- Call site 1: tool proxy (/query, org Editor) ---
+			proxyResp := jsonBody("query", editorPluginContext(), `{"intent":"x"}`)
+			if proxyResp.Status != http.StatusBadGateway {
+				t.Fatalf("tool proxy status=%d want 502 body=%s", proxyResp.Status, proxyResp.Body)
+			}
+			var env toolProxyResponse
+			if err := json.Unmarshal(proxyResp.Body, &env); err != nil {
+				t.Fatalf("tool proxy unmarshal: %v body=%s", err, proxyResp.Body)
+			}
+			assertNoLeak("tool proxy", env.Error)
+			if want := "dot-ai unreachable (502)" + tc.wantTail; env.Error != want {
+				t.Fatalf("tool proxy error = %q, want %q", env.Error, want)
+			}
+
+			// --- Call site 2: probeVersion (/test-connection, Admin-only) ---
+			probeResp := jsonBody("test-connection", adminPluginContext(), `{"apiUrl":"`+apiBase+`","apiKey":"tok"}`)
+			if probeResp.Status != http.StatusBadGateway {
+				t.Fatalf("probe status=%d want 502 body=%s", probeResp.Status, probeResp.Body)
+			}
+			var connResp testConnectionResponse
+			if err := json.Unmarshal(probeResp.Body, &connResp); err != nil {
+				t.Fatalf("probe unmarshal: %v body=%s", err, probeResp.Body)
+			}
+			assertNoLeak("probeVersion", connResp.Message)
+			if want := "dot-ai unreachable" + tc.wantTail; connResp.Message != want {
+				t.Fatalf("probeVersion message = %q, want %q", connResp.Message, want)
+			}
+
+			// --- Server-side log retains the full detail (relocated, not deleted) ---
+			if !strings.Contains(capture.joined(), "127.0.0.1") {
+				t.Fatalf("server-side log dropped transport detail; captured logs:\n%s", capture.joined())
+			}
+		})
+	}
 }
 
 // TestToolRoleGate is the DOTAI-SEC-001 control matrix.
@@ -1482,7 +1630,6 @@ func TestRemediateAnalysisOnly(t *testing.T) {
 		}
 	})
 
-
 	t.Run("query_allowlists_intent_only", func(t *testing.T) {
 		gotPath, gotBody = "", nil
 		payload := []byte(`{"intent":"list pods","execute":true,"mode":"execute"}`)
@@ -1523,8 +1670,6 @@ func TestRemediateAnalysisOnly(t *testing.T) {
 		}
 	})
 }
-
-
 
 func TestCheckHealth(t *testing.T) {
 	t.Run("unconfigured", func(t *testing.T) {
@@ -2019,7 +2164,6 @@ func TestAskLogDisabledByDefault(t *testing.T) {
 	}
 }
 
-
 func TestAppendAskLogRotatesAtMaxSize(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "dotai-ask.log")
@@ -2339,4 +2483,3 @@ func TestAskLogUserAttribution(t *testing.T) {
 		}
 	})
 }
-
