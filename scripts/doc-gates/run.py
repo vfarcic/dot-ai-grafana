@@ -568,23 +568,22 @@ def gate_d(rep: Report, check_links: bool, warn_actions: bool) -> None:
                 "commit can test a different image tomorrow. Pin as `name:tag@sha256:...`.",
             )
 
-    # D2 - GitHub Actions SHA pinning. Verified against this repo before enforcing:
-    # release.yml pins every action by SHA, while ci.yml, bundle-stats.yml and
-    # is-compatible.yml mix SHA pins with actions/checkout@v7 style tags. The practice
-    # is NOT uniform, so enforcing it would fire on a clean main. Reported only when
-    # explicitly asked for.
-    if warn_actions:
-        for rel in [p for p in tracked if p.startswith(".github/workflows/")]:
-            text = read(rel) or ""
-            for m in USES_RX.finditer(text):
-                ref = m.group(1)
-                if "@" not in ref:
-                    continue
-                if SHA_RX.match(ref.rsplit("@", 1)[1]):
-                    continue
-                rep.warn(gate, f"{rel}:{line_of(text, m.start())}",
-                         f"`uses: {ref}` is not pinned to a 40-char SHA")
-
+    # D2 - GitHub Actions SHA pinning. Every workflow `uses:` must be pinned
+    # to a 40-character commit SHA (finding). If warn_actions is explicitly set,
+    # it is demoted to a warning for backwards compatibility.
+    for rel in [p for p in tracked if p.startswith(".github/workflows/")]:
+        text = read(rel) or ""
+        for m in USES_RX.finditer(text):
+            ref = m.group(1)
+            if "@" not in ref:
+                continue
+            if SHA_RX.match(ref.rsplit("@", 1)[1]):
+                continue
+            msg = f"`uses: {ref}` is not pinned to a 40-char SHA"
+            if warn_actions:
+                rep.warn(gate, f"{rel}:{line_of(text, m.start())}", msg)
+            else:
+                rep.finding(gate, f"{rel}:{line_of(text, m.start())}", msg)
     # D3 - external links. Warn-only: a link checker that fails CI on somebody
     # else's outage is a liability, and this gate must stay trustworthy.
     if check_links:
@@ -627,7 +626,7 @@ def main() -> int:
     ap.add_argument("--gates", default="abcd", help="subset of gates to run, e.g. bc")
     ap.add_argument("--links", action="store_true", help="run the warn-only external link check")
     ap.add_argument("--warn-unpinned-actions", action="store_true",
-                    help="list workflow `uses:` not pinned to a SHA (warn only)")
+                    help="downgrade unpinned workflow `uses:` check to a warning instead of failing")
     ap.add_argument("-v", "--verbose", action="store_true", help="print skipped rows")
     ap.add_argument("--repo", help="repo root to check (default: the repo this script lives in)")
     args = ap.parse_args()

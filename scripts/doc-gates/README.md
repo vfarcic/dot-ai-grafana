@@ -83,11 +83,8 @@ If a value cannot be extracted unambiguously the row **skips** and says so under
 
 ## Gate D and GitHub Actions pinning
 
-`uses:` SHA pinning is **not** enforced. Verified before writing this: `release.yml`
-pins every action by SHA, while `ci.yml`, `bundle-stats.yml` and `is-compatible.yml`
-mix SHA pins with `actions/checkout@v7`-style tags. The practice is not uniform, so
-enforcing it would fire on a clean `main`. `--warn-unpinned-actions` lists them as
-warnings for whoever wants to finish the job; it never fails a build.
-
+`uses:` SHA pinning is enforced by default. Every action in `.github/workflows/`
+must be pinned to a 40-character commit SHA (e.g. `uses: actions/checkout@<sha> # v7.0.1`).
+`--warn-unpinned-actions` can be passed to demote unpinned action findings to warnings.
 The external link check is warn-only for the same reason: a link checker that
 fails CI on somebody else's outage is a liability.
