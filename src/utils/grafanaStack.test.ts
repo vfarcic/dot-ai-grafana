@@ -668,6 +668,35 @@ describe('dashboardUidsFromAlertFrames', () => {
     expect(uids).toEqual(['ok-uid-1']);
   });
 
+  test('rejects empty or malformed dashboard uids without passing them through', () => {
+    const uids = dashboardUidsFromAlertFrames([
+      {
+        fields: [
+          {
+            name: 'dashboardUid',
+            type: 'string',
+            values: ['', '   ', 'tiny', 'bad char$', 'uid with spaces', 'valid-uid-1'],
+          },
+        ],
+      } as never,
+      {
+        fields: [
+          {
+            name: 'alertname',
+            type: 'string',
+            values: ['Alert'],
+            labels: {
+              dashboardUID: '',
+              __dashboardUid__: '   ',
+              dashboard_uid: 'toolong' + 'x'.repeat(40),
+            },
+          },
+        ],
+      } as never,
+    ]);
+    expect(uids).toEqual(['valid-uid-1']);
+  });
+
   test('enforces UID length bounds: rejects 41-char UID and keeps 40-char valid UID', () => {
     const uid40 = 'a'.repeat(40);
     const uid41 = 'a'.repeat(41);
@@ -701,5 +730,60 @@ describe('dashboardUidsFromAlertFrames', () => {
     expect(dashboardHintFromUids([], true)).toBe('dashboards: none linked on firing alerts');
     // 3. no alerts firing -> empty string to preserve budget
     expect(dashboardHintFromUids([], false)).toBe('');
+  });
+  test('given alert frames carrying a dashboard UID, Map hint targets THAT uid', async () => {
+    mockGet.mockImplementation(async () => ({ query: () => of({ data: [] }) }));
+    mockBackendGet.mockImplementation(async (url: string) => {
+      if (url === `${AM_URL}/api/v2/alerts`) {
+        return [
+          alertmanagerAlert({
+            labels: { alertname: 'TargetedServiceAlert' },
+            annotations: { dashboardUID: 'target-service-dash' },
+          }),
+        ];
+      }
+      return [];
+    });
+
+    const result = await fetchStackContext('check target service health');
+    expect(result.mapHint).toContain('dashboards: /d/target-service-dash');
+    expect(result.mapHint).not.toContain('none linked on firing alerts');
+  });
+
+  test('given alert frames with NO dashboard uid, behavior degrades gracefully', async () => {
+    mockGet.mockImplementation(async () => ({ query: () => of({ data: [] }) }));
+    mockBackendGet.mockImplementation(async (url: string) => {
+      if (url === `${AM_URL}/api/v2/alerts`) {
+        return [
+          alertmanagerAlert({
+            labels: { alertname: 'UnlinkedAlert' },
+            annotations: { summary: 'an alert without dashboard link' },
+          }),
+        ];
+      }
+      return [];
+    });
+
+    const result = await fetchStackContext('check unlinked alert');
+    expect(result.alertLines.length).toBeGreaterThan(0);
+    expect(result.mapHint).toContain('dashboards: none linked on firing alerts');
+    expect(result.current).toContain('(none linked on firing alerts)');
+    expect(result.drilldowns.filter((d) => d.href.startsWith('/d/'))).toHaveLength(0);
+  });
+
+  test('non-alert path is UNCHANGED: no alert firing yields no dashboard hint in Map hint', async () => {
+    mockGet.mockImplementation(async () => ({ query: () => of({ data: [] }) }));
+    mockBackendGet.mockImplementation(async (url: string) => {
+      if (url === `${AM_URL}/api/v2/alerts`) {
+        return [];
+      }
+      return [];
+    });
+
+    const result = await fetchStackContext('cluster health without firing alerts');
+    expect(result.alertLines).toHaveLength(0);
+    expect(result.mapHint).not.toContain('dashboards:');
+    expect(result.mapHint).toBe('Loki Loki, Prometheus Prometheus, Tempo Tempo, Alertmanager Alertmanager');
+    expect(result.current).not.toContain('Dashboards (from firing alerts):');
   });
 });
