@@ -5,6 +5,7 @@ import {
   PROVISIONED_API_KEY,
   UPSTREAM_INTERNAL_FIELD,
   UPSTREAM_SECRET_MARKER,
+  UPSTREAM_URL_LEAK_NEEDLES,
   asEnvelope,
   bodyContainsForbidden,
   dialProbe,
@@ -17,6 +18,7 @@ import {
  * Reliability by design — stable {ok,status,summary,error} envelope under
  * upstream failure; no panic-shaped HTML; secrets stay out of error text.
  * Phase 3 (issue #44) closes R2's transport-error half and adds R5.
+ * Phase 2 (#58) pins the same R2 transport-error 502: no upstream scheme/host/port.
  *
  * Deferred (see issue #44), with citations now that the code exists on this tree:
  * - R1 (nil/unconfigured client, no panic): Go unit tests on `main`
@@ -161,6 +163,12 @@ test.describe('Reliability by design — transport-level upstream failure', () =
 
     const forbidden = bodyContainsForbidden(text, UPSTREAM_SECRET_MARKER, UPSTREAM_INTERNAL_FIELD, PROVISIONED_API_KEY);
     expect(forbidden, text).toEqual([]);
+
+    // #58 / #44 P-privacy: the 502 envelope must not echo the configured
+    // upstream scheme, host, or port. Unit equivalent:
+    // TestTransportErrorDoesNotLeakUpstreamURL (pkg/plugin/resources_test.go).
+    const urlLeak = bodyContainsForbidden(text, ...UPSTREAM_URL_LEAK_NEEDLES);
+    expect(urlLeak, `502 envelope must not leak upstream URL pieces: ${text}`).toEqual([]);
 
     // The stub reads (and probe-counts) the body before resetting the
     // connection, so client.Do really dialled and failed transport-side

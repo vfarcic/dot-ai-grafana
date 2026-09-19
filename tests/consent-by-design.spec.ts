@@ -1,10 +1,12 @@
 import type { Page } from '@playwright/test';
 import { test, expect } from './fixtures';
 import { testIds } from '../src/components/testIds';
+import { MAX_INTENT_CHARS, MAX_PRIOR_CHARS } from '../src/utils/progressiveContext';
 import {
   type StubIntent,
   asEnvelope,
   isStableEnvelope,
+  priorBlockFromPacked,
   resourcePath,
   stubIntents,
 } from './byDesignHelpers';
@@ -19,8 +21,11 @@ import {
  * than here — see the second describe's note on why this file stays read-only on
  * plugin settings.
  *
- * Deferred (see issue #44):
- * - debugLog opt-in default-off (main always writes ask log; gate branch adds the flag)
+ * C1 / P4 debugLog default-off is unit-covered on main
+ * (`TestAskLogDisabledByDefault` in `pkg/plugin/resources_test.go`) — there is
+ * no browser-visible ask-log read path, and this file stays read-only on plugin
+ * settings (see the notice describe below). Provisioned-off is pinned on the
+ * settings GET in `tests/privacy-by-design.spec.ts`.
  */
 
 const adminState = 'playwright/.auth/admin.json';
@@ -160,7 +165,13 @@ test.describe('Consent by design — the notice matches what is POSTed', () => {
     // The follow-up POST is the one whose Prior block quotes the first question.
     const packed = followUp(intents, first);
     expect(packed.text, packed.text).toContain('Prior:');
-    expect(packed.len).toBeLessThanOrEqual(1000);
+    expect(packed.len).toBeLessThanOrEqual(MAX_INTENT_CHARS);
+    // P7: the Prior *block* (label excluded) is ≤ MAX_PRIOR_CHARS, not only the
+    // whole packed intent. Same extraction as progressiveContext.test.ts.
+    const priorBlock = priorBlockFromPacked(packed.text);
+    expect(priorBlock, packed.text).not.toBeNull();
+    expect(priorBlock!.length, packed.text).toBeGreaterThan(0);
+    expect(priorBlock!.length, packed.text).toBeLessThanOrEqual(MAX_PRIOR_CHARS);
     // The notice claims a datasource read happens; the packed body must show one.
     expect(packed.text, packed.text).toContain('Current:');
     // …and History itself is never a block on the wire.

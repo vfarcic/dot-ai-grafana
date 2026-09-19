@@ -16,10 +16,19 @@ import {
  * Privacy by design — bearer never leaves secure storage; resource responses stay
  * on the stable envelope; bundle does not embed the provisioned token.
  *
- * Deferred (not on main today — see issue #44):
- * - ask log opt-in via jsonData.debugLog (main always appends)
- * - ask log login/role fields and email absence (gate branch only)
- * - Prior: ≤240 char packing inside the 1000-char budget (blocked on #14+#43)
+ * Shipped on main (these are no longer deferred — #14 / #25 / #43 / #58):
+ * - P4 / C1 ask-log default-off: `jsonData.debugLog` gates `appendAskLog`
+ *   (`pkg/plugin/resources.go`). Unit: `TestAskLogDisabledByDefault`. No e2e
+ *   log-read path exists; this file only pins that the provisioned instance
+ *   does not enable the flag.
+ * - P5 login+role, never email: unit `TestAskLogUserAttribution`.
+ * - P6 body preview strips secrets: unit `TestAskBodyPreviewStripsSecrets`.
+ * - P7 Prior block ≤240 inside the 1000-char budget: unit
+ *   `src/utils/progressiveContext.test.ts`; e2e pin is the follow-up Ask in
+ *   `tests/consent-by-design.spec.ts` (stubIntents path, not a second suite).
+ * - #58 transport-error 502 must not leak upstream scheme/host/port: unit
+ *   `TestTransportErrorDoesNotLeakUpstreamURL`; e2e pin sits next to R2 in
+ *   `tests/reliability-by-design.spec.ts`.
  */
 
 const adminState = 'playwright/.auth/admin.json';
@@ -61,6 +70,12 @@ test.describe('Privacy by design — bearer token isolation', () => {
 
     // secureJsonFields may flag apiKey as set, but the value must not appear.
     expect(text).not.toContain(PROVISIONED_API_KEY);
+
+    // P4 / C1: provisioned default is off. The write-path (no file when the
+    // flag is absent) stays with TestAskLogDisabledByDefault — there is no
+    // browser-visible ask-log read surface to e2e without expanding product.
+    const settings = JSON.parse(text) as { jsonData?: { debugLog?: boolean } };
+    expect(settings.jsonData?.debugLog ?? false).toBe(false);
   });
 
   test('tool resource responses never echo the bearer token', async ({ request }) => {
