@@ -160,7 +160,7 @@ jobs:
 
       - name: Resolve Grafana E2E versions
         id: resolve-versions
-        uses: grafana/plugin-actions/e2e-version@64ea9946103fc0a569c53cf53d27f568af2a44ce # e2e-version/v3.1.0
+        uses: grafana/plugin-actions/e2e-version@b2d42498af86999c092e974be98860757fd3cb10 # e2e-version/v3.2.0
 
   playwright-tests:
     needs: [resolve-versions, build]
