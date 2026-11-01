@@ -10,6 +10,18 @@ export const UPSTREAM_INTERNAL_FIELD = 'raw_upstream_internal_do_not_leak';
 /** Provisioned bearer (secureJsonData). Must never appear in settings/resources/bundle. */
 export const PROVISIONED_API_KEY = 'bydesign-e2e-bearer-token-do-not-leak';
 
+/**
+ * Provisioned stub `apiUrl` pieces (`provisioning/plugins/apps.yaml`).
+ * A transport-error 502 must not echo scheme, host, or port to the browser
+ * (#58 / #44 privacy). The Go unit pin is TestTransportErrorDoesNotLeakUpstreamURL.
+ */
+export const UPSTREAM_URL_LEAK_NEEDLES = [
+  'http://',
+  'https://',
+  'dot-ai-stub', // covers `dot-ai-stub.svc` and the compose service name
+  ':8080',
+] as const;
+
 export type ToolName = 'query' | 'remediate' | 'test-connection' | 'health';
 
 export function resourcePath(tool: ToolName): string {
@@ -43,6 +55,16 @@ export function isStableEnvelope(body: unknown): boolean {
 export function bodyContainsForbidden(body: unknown, ...needles: string[]): string[] {
   const text = typeof body === 'string' ? body : JSON.stringify(body ?? '');
   return needles.filter((n) => n && text.includes(n));
+}
+
+/**
+ * Prior-block body (the "Prior:" label excluded) as a wire consumer extracts it.
+ * Same regex as `src/utils/progressiveContext.test.ts` — everything between the
+ * label and the next section. Returns null when no Prior block is present.
+ */
+export function priorBlockFromPacked(text: string): string | null {
+  const match = text.match(/Prior:\n([\s\S]*?)\n\n(?:Map:|Question:|Issue:)/);
+  return match ? match[1] : null;
 }
 
 /**
